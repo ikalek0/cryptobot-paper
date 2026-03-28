@@ -79,16 +79,57 @@ function bollingerBands(arr,p=20,mult=2){
   return{upper:mid+mult*sd,lower:mid-mult*sd,mid};
 }
 
-// ── Régimen ───────────────────────────────────────────────────────────────────
-function detectRegime(h){
-  if(!h||h.length<50)return"UNKNOWN";
-  const last=h[h.length-1],ma20=h.slice(-20).reduce((a,b)=>a+b,0)/20,ma50=h.slice(-50).reduce((a,b)=>a+b,0)/50;
+// ── Régimen con ADX ───────────────────────────────────────────────────────────
+// ADX mide la FUERZA de la tendencia (no la dirección)
+// ADX > 25 = tendencia fuerte (BULL o BEAR según dirección)
+// ADX < 20 = sin tendencia (LATERAL)
+function calcADX(h, period=14) {
+  if (h.length < period*2) return 15; // sin datos = asumir lateral
+  const slice = h.slice(-(period*2+1));
+  let plusDM=0, minusDM=0, tr=0;
+  const smoothed = { plusDM:0, minusDM:0, tr:0 };
+  for (let i=1; i<slice.length; i++) {
+    const high=slice[i]*1.001, low=slice[i]*0.999; // approx sin datos OHLC
+    const prevHigh=slice[i-1]*1.001, prevLow=slice[i-1]*0.999, prevClose=slice[i-1];
+    const upMove=high-prevHigh, downMove=prevLow-low;
+    const pdm = upMove>downMove&&upMove>0 ? upMove : 0;
+    const mdm = downMove>upMove&&downMove>0 ? downMove : 0;
+    const atr=Math.max(high-low, Math.abs(high-prevClose), Math.abs(low-prevClose));
+    if (i <= period) { smoothed.plusDM+=pdm; smoothed.minusDM+=mdm; smoothed.tr+=atr; }
+    else {
+      smoothed.plusDM = smoothed.plusDM - smoothed.plusDM/period + pdm;
+      smoothed.minusDM= smoothed.minusDM- smoothed.minusDM/period + mdm;
+      smoothed.tr     = smoothed.tr     - smoothed.tr/period      + atr;
+    }
+  }
+  if (!smoothed.tr) return 15;
+  const plusDI=100*smoothed.plusDM/smoothed.tr;
+  const minusDI=100*smoothed.minusDM/smoothed.tr;
+  const dx=Math.abs(plusDI-minusDI)/(plusDI+minusDI||1)*100;
+  return +dx.toFixed(1);
+}
+
+function detectRegime(h) {
+  if (!h||h.length<50) return "UNKNOWN";
+  const last=h[h.length-1];
+  const ma20=h.slice(-20).reduce((a,b)=>a+b,0)/20;
+  const ma50=h.slice(-50).reduce((a,b)=>a+b,0)/50;
   const trend20=(last-h[Math.max(0,h.length-20)])/h[Math.max(0,h.length-20)]*100;
+  const trend5 =(last-h[Math.max(0,h.length-5)]) /h[Math.max(0,h.length-5)] *100;
+  const adx=calcADX(h, 14);
   const vol=stdDev(h.slice(-20).map((v,i,a)=>i===0?0:(v-a[i-1])/a[i-1]));
-  if(vol>0.015&&Math.abs(trend20)<2)return"LATERAL";
-  if(last>ma20&&ma20>ma50&&trend20>2)return"BULL";
-  if(last<ma20&&ma20<ma50&&trend20<-2)return"BEAR";
-  return"LATERAL";
+
+  // ADX fuerte + dirección clara = tendencia
+  if (adx > 22) {
+    if (last>ma20 && trend20>1.5 && trend5>0) return "BULL";
+    if (last<ma20 && trend20<-1.5 && trend5<0) return "BEAR";
+  }
+  // BTC caída rápida en 5 velas = BEAR aunque ADX no lo confirme aún
+  if (trend5 < -3 && last < ma20) return "BEAR";
+  // Subida clara con MA alineadas = BULL
+  if (last>ma20 && ma20>ma50 && trend20>3 && adx>18) return "BULL";
+  // Default: LATERAL (sin tendencia confirmada)
+  return "LATERAL";
 }
 
 // ── Señales adaptativas ───────────────────────────────────────────────────────
@@ -401,12 +442,19 @@ class CryptoBotFinal {
           // Fase 1: sin filtro ensemble/Q — opera todo para aprender
           // Fase 2: solo bloquea si ensemble muy negativo
           // Fase 3: requiere consenso real
-          // Fase 1: solo bloquear señales extremadamente malas (score<20)
-          if(learningPhase===1 && sig.score<20) continue;
-          // Fase 2: filtro suave
-          if(learningPhase===2 && ensResult.buyRatio<0.25 && qAction==="SKIP") continue;
-          // Fase 3: consenso real
-          if(learningPhase===3 && !((qAction==="BUY"&&ensResult.decision==="BUY")||ensResult.buyRatio>=0.60)) continue;
+          // ── Filtro por fases: más estricto a medida que el bot aprende ──────
+          // Fase 1 (exploración): aprender de todo, solo filtrar scores muy bajos
+          if(learningPhase===1 && sig.score<25) continue;
+          // Fase 2 (refinamiento): ensemble debe confirmar mínimamente O Q-Learning BUY
+          if(learningPhase===2 && ensResult.buyRatio<0.30 && qAction!=="BUY") continue;
+          // Fase 3 (producción): consenso real exigido
+          if(learningPhase===3 && !((qAction==="BUY"&&ensResult.buyRatio>=0.40)||ensResult.buyRatio>=0.55)) continue;
+          // Extra: en LATERAL, exigir RSI más bajo para MR (evitar entrar en tendencia bajista)
+          if(sig.strategy==="MEAN_REVERSION" && sig.rsiVal>42 && sig.bbPos>0.25) continue;
+          // Extra: no entrar si BTC cayó >2% en las últimas 5 velas (contagio bearish)
+          const btcH=this.history["BTCUSDT"]||[];
+          const btcMom5=btcH.length>5?((btcH[btcH.length-1]-btcH[btcH.length-6])/btcH[btcH.length-6]*100):0;
+          if(btcMom5<-2 && sig.symbol!=="BTCUSDT" && this.marketRegime==="LATERAL") continue;
 
           const volAnom = getVolumeAnomaly(this.volumeHistory, sig.symbol);
           const volBoost = volAnom.anomaly && sig.score > 55 ? 1.3 : 1.0;
