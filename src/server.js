@@ -154,7 +154,7 @@ function scheduleDailySync() {
 }
 scheduleDailySync();
 
-  tg.startCommandListener(() => ({ ...bot.getState(), instance:"PAPER" }));
+  const tgControls = tg.startCommandListener(() => ({...bot.getState(),instance:"PAPER",dailyPnlPct:bot._dailyPnlPct||0,momentumMult:bot.hourMultiplier||1,cryptoPanic:cryptoPanic.getStatus()}));
 
   fetchFearGreed().then(fg => { bot.fearGreed=fg.value; });
 
