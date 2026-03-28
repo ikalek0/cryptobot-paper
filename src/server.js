@@ -40,6 +40,8 @@ function sendEquityToBafirPaper(value) {
 
 const blacklist   = new Blacklist(3, 12); // Cooldown más corto en paper (12h)
 const marketGuard = new MarketGuard();
+const cryptoPanic = new CryptoPanicDefense();
+cryptoPanic.start();
 
 const app    = express();
 const server = http.createServer(app);
