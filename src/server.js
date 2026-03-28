@@ -55,7 +55,7 @@ function broadcast(msg) {
   wss.clients.forEach(c => { if(c.readyState===WebSocket.OPEN) c.send(d); });
 }
 
-app.get("/api/state",  (_,res) => res.json(bot ? { ...bot.getState(), instance:"PAPER", blacklist:blacklist.getStatus() } : {}));
+app.get("/api/state",  (_,res) => res.json(bot ? { ...bot.getState(), instance:"PAPER", blacklist:blacklist.getStatus() } : {loading:true,instance:"PAPER",totalValue:0}));
 app.get("/api/health", (_,res) => res.json({ ok:true, instance:"PAPER", tick:bot?.tick, uptime:process.uptime(), tv:bot?.totalValue() }));
 
 // Datos de aprendizaje (Q-Learning, ensemble, patrones, contrafactuales)
