@@ -4,6 +4,7 @@
 const { RISK_PROFILES, CircuitBreaker, TrailingStop, calcPositionSize, AutoOptimizer } = require("./risk");
 const { PatternMemory }    = require("./patternMemory");
 const { RiskLearning }     = require("./riskLearning");
+const { CorrelationManager } = require("./correlationManager");
 const { QLearning, EnsembleVoter } = require("./qlearning");
 const { IntradayTrend }    = require("./intradayTrend");
 const { analyzeCounterfactual, CounterfactualMemory } = require("./counterfactual");
@@ -193,6 +194,7 @@ class CryptoBotFinal {
     this.ensemble       = new EnsembleVoter();
     this.intradayTrend  = new IntradayTrend();
     this.riskLearning   = new RiskLearning();
+    this.corrManager    = new CorrelationManager();
     this.historicalResults = null;
     if(saved){
       this.prices=saved.prices||{};this.history=saved.history||{};this.portfolio=saved.portfolio||{};
@@ -335,13 +337,15 @@ class CryptoBotFinal {
           if(learningPhase===3){const grp=PAIRS.find(p=>p.symbol===s.symbol)?.group;if(grp&&(groupCount[grp]||0)>=3)return false;}
           return true;
         }).sort((a,b)=>{
-          // Ordenar por: score × pairScore × momentum reciente
           const scoreA = a.score*(this.pairScores[a.symbol]?.score||50)/100;
           const scoreB = b.score*(this.pairScores[b.symbol]?.score||50)/100;
-          // Bonus por momentum positivo en las últimas velas
+          // Bonus por momentum propio
           const momA = (a.mom10||0) > 1 ? 1.1 : 1.0;
           const momB = (b.mom10||0) > 1 ? 1.1 : 1.0;
-          return (scoreB*momB)-(scoreA*momA);
+          // Bonus por confirmación de pares correlacionados
+          const corrA = this.corrManager.getSizeMultiplier(a.symbol, this.portfolio, this.prices, a.score);
+          const corrB = this.corrManager.getSizeMultiplier(b.symbol, this.portfolio, this.prices, b.score);
+          return (scoreB*momB*corrB)-(scoreA*momA*corrA);
         }).slice(0,maxPos-nOpen);
 
         for(const sig of buyable){
@@ -365,7 +369,8 @@ class CryptoBotFinal {
           if(learningPhase===2 && ensResult.buyRatio<0.25 && qAction==="SKIP") continue;
           if(learningPhase===3 && !((qAction==="BUY"&&ensResult.decision==="BUY")||ensResult.buyRatio>=0.60)) continue;
 
-          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj;
+          const corrMult = this.corrManager.getSizeMultiplier(sig.symbol, this.portfolio, this.prices, sig.score);
+          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*corrMult;
           if(invest<10||invest>availCash)continue;
           const qty=invest*(1-fee)/price,atrV=atr(h,14);
           const minStop=price*0.975,stopLoss=Math.min(price-Math.max(this.profile.atrMultiplier*atrV,price*0.025),minStop);
@@ -414,6 +419,7 @@ class CryptoBotFinal {
       priceHistory:Object.fromEntries(Object.entries(this.history||{}).map(([k,v])=>[k,v.slice(-200)])),
       riskLearningStats:this.riskLearning.getStats(),
       riskLearningParams:this.riskLearning.params,
+      correlationStatus:this.corrManager.getStatus(this.portfolio,this.prices),
       maxEquity:+this.maxEquity.toFixed(2),drawdownPct:+(dd*100).toFixed(2),
     };
   }
