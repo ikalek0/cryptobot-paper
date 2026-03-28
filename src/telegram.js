@@ -103,6 +103,19 @@ function scheduleReports(getState) {
   console.log(`[TG] Diario en ${Math.round(msUntil(20)/60000)}min | Semanal en ${Math.round(msUntilSunday()/3600000)}h`);
 }
 
+function notifyMomentumBoost(mult, pnlPct) {
+  if (mult >= 1.6) send(`🚀 <b>PAPER MOMENTUM x${mult.toFixed(1)}</b>\nP&L hoy: <b>+${pnlPct.toFixed(1)}%</b>\nAprendiendo con posiciones más grandes.`);
+}
+function notifyTradeWithExplanation(trade, regime) {
+  if (!trade || trade.type !== "SELL" || Math.abs(trade.pnl||0) < 1) return;
+  const sym = (trade.symbol||"").replace("USDT","") || "—";
+  const pnl = trade.pnl || 0;
+  const emoji = pnl >= 3 ? "💰" : pnl >= 0 ? "✅" : "⚠️";
+  const reason = trade.reason || "señal";
+  const msg = emoji+" <b>[PAPER] "+sym+" "+(pnl>=0?"+":"")+pnl.toFixed(2)+"%</b>\nRazón: "+reason+" · Régimen: "+regime;
+  send(msg);
+}
+
 module.exports = {
   notifyCircuitBreaker,notifyBigWin,notifyBigLoss,
   notifyDefensiveMode,notifyDefensiveOff,notifyBlacklist,
@@ -110,6 +123,7 @@ module.exports = {
   notifyFearGreed,notifyDailyLimitChange,notifyStartup,
   notifyDailySummary,notifyWeeklySummary,
   scheduleReports,startCommandListener,
+  notifyMomentumBoost, notifyTradeWithExplanation, send,
 };
 
 // ── Notificaciones sync paper→live ────────────────────────────────────────────

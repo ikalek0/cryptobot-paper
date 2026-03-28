@@ -10,6 +10,7 @@ const { WebSocketServer, WebSocket } = require("ws");
 const { CryptoBotFinal, PAIRS }       = require("./engine");
 const { saveState, loadState, deleteState } = require("./database");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
+const { CryptoPanicDefense } = require("./cryptoPanic");
 const { fetchFearGreed, fetchNewsAlert, fetchAllKlines, runNightlyReplay } = require("./feeds");
 const { exportParams, calcSyncStats } = require("./sync");
 const { runHistoricalSimulation }     = require("./historicalSimulation");
@@ -207,7 +208,22 @@ function startLoop() {
     bot._dailyPnlPct = todayPnlPaper;
     bot._dailyLimitBoost = todayPnlPaper >= 7 ? Math.round(todayPnlPaper / 3) : 0;
     const momentumMult = todayPnlPaper<0?0.8:todayPnlPaper<5?1.0:todayPnlPaper<10?1.4:todayPnlPaper<15?1.8:2.5;
-    bot.hourMultiplier = getTradingScore().score * momentumMult;
+    bot._cryptoPanicFn = (sym) => cryptoPanic.getSizeMultiplier(sym);
+    bot._newsMultiplier = cryptoPanic.globalDefensive ? 0.3 : 1.0;
+    bot.hourMultiplier = getTradingScore().score * momentumMult * (cryptoPanic.globalDefensive ? 0.5 : 1.0);
+
+    // Alerta Telegram momentum paper
+    const prevMomPaper = bot._prevMomentumLevel || 1.0;
+    if (momentumMult >= 1.6 && prevMomPaper < 1.6 && tg.notifyMomentumBoost)
+      tg.notifyMomentumBoost(momentumMult, todayPnlPaper);
+    bot._prevMomentumLevel = momentumMult;
+
+    // ── Aplicar parámetros aprendidos a los subsistemas (paper) ──────────────
+    if (bot.riskLearning) {
+      cryptoPanic._learnedGlobalThreshold = bot.riskLearning.get("cpGlobalThreshold", 5);
+      cryptoPanic._learnedExpiryHours     = bot.riskLearning.get("cpExpiryHours", 2);
+      if (bot.trailing) bot.trailing._learnedTrailingMin = bot.riskLearning.get("trailingMinPct", 2) / 100;
+    }
 
     // En PAPER: límite diario muy alto para aprender más
     // Sobreescribimos getDailyLimit para que sea siempre 50 en paper

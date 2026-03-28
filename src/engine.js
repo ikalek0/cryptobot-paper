@@ -3,6 +3,7 @@
 
 const { RISK_PROFILES, CircuitBreaker, TrailingStop, calcPositionSize, AutoOptimizer } = require("./risk");
 const { PatternMemory }    = require("./patternMemory");
+const { RiskLearning }     = require("./riskLearning");
 const { QLearning, EnsembleVoter } = require("./qlearning");
 const { IntradayTrend }    = require("./intradayTrend");
 const { analyzeCounterfactual, CounterfactualMemory } = require("./counterfactual");
@@ -191,6 +192,7 @@ class CryptoBotFinal {
     this.qLearning      = new QLearning({ alpha:0.1, gamma:0.9, epsilon:0.15 });
     this.ensemble       = new EnsembleVoter();
     this.intradayTrend  = new IntradayTrend();
+    this.riskLearning   = new RiskLearning();
     this.historicalResults = null;
     if(saved){
       this.prices=saved.prices||{};this.history=saved.history||{};this.portfolio=saved.portfolio||{};
@@ -269,6 +271,9 @@ class CryptoBotFinal {
     }));
 
     const newTrades=[],fee=getFee(this.useBnb);
+    this.riskLearning.evaluateDecisions(this.prices);
+    const rlResult=this.riskLearning.optimize();
+    if(rlResult) this._rlChanges=rlResult;
 
     // GESTIÓN POSICIONES
     for(const[symbol,pos]of Object.entries(this.portfolio)){
@@ -406,13 +411,17 @@ class CryptoBotFinal {
       totalFees:+this.log.reduce((s,l)=>s+(l.fee||0),0).toFixed(2),
       contrafactualLog:this.contrafactualLog.slice(0,10),
       useBnb:this.useBnb,recentWinRate:wr,
+      priceHistory:Object.fromEntries(Object.entries(this.history||{}).map(([k,v])=>[k,v.slice(-200)])),
+      riskLearningStats:this.riskLearning.getStats(),
+      riskLearningParams:this.riskLearning.params,
       maxEquity:+this.maxEquity.toFixed(2),drawdownPct:+(dd*100).toFixed(2),
     };
   }
 
   serialize(){
     const s=this.getState();
-    s.optimizerHistory=this.optimizer.history;s.trailingHighs=this.trailing.highs;
+    s.optimizerHistory=this.optimizer.history;
+    if(s.learningData) s.learningData.riskLearning=this.riskLearning.toJSON();s.trailingHighs=this.trailing.highs;
     s.reentryTs=this.reentryTs;s.maxEquity=this.maxEquity;s.drawdownAlerted=this.drawdownAlerted;
     s.tfHistory=this.tfHistory;
     s.learningData={
