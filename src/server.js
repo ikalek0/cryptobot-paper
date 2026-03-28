@@ -310,4 +310,7 @@ function startLoop() {
   server.listen(PORT, ()=>console.log(`\n📋 CRYPTOBOT PAPER en http://localhost:${PORT} | Capital: $${CAPITAL_USDT} USDT\n`));
 }
 
-wss.on("connection", ws=>{ if(bot) ws.send(JSON.stringify({type:"state",data:{...bot.getState(),instance:"PAPER"}})); });
+wss.on("connection", ws=>{
+  if(bot) ws.send(JSON.stringify({type:"state",data:{...bot.getState(),instance:"PAPER"}}));
+  else    ws.send(JSON.stringify({type:"state",data:{loading:true,instance:"PAPER",totalValue:0}}));
+});
