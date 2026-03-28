@@ -72,6 +72,7 @@ class AutoOptimizer {
     return result;
   }
   getParams(){return this.params;}
+  applyParams(p){Object.assign(this.params,p);console.log("[Optimizer] Params aplicados desde sync:",this.params);}
 }
 
 module.exports={RISK_PROFILES,CircuitBreaker,TrailingStop,calcPositionSize,AutoOptimizer};

@@ -134,6 +134,26 @@ let bot;
 
   tg.notifyStartup("PAPER (aprendizaje)");
   tg.scheduleReports(() => ({ ...bot.getState(), instance:"PAPER" }));
+
+// ── SYNC DIARIO SELECTIVO: cada día a las 03:00 UTC paper→live ───────────────
+function scheduleDailySync() {
+  function msUntil3am() {
+    const now=new Date(), next=new Date();
+    next.setUTCHours(3,0,0,0);
+    if(next<=now) next.setUTCDate(next.getUTCDate()+1);
+    return next-now;
+  }
+  setTimeout(function runDailySync() {
+    if(bot) {
+      console.log("[SYNC-DAILY] Ejecutando sync diario paper→live...");
+      exportDailyLearning(bot, process.env.LIVE_BOT_URL, process.env.SYNC_SECRET||"bafir_sync_secret_2024");
+    }
+    setTimeout(runDailySync, 24*60*60*1000);
+  }, msUntil3am());
+  console.log(`[SYNC-DAILY] Programado en ${Math.round(msUntil3am()/3600000)}h`);
+}
+scheduleDailySync();
+
   tg.startCommandListener(() => ({ ...bot.getState(), instance:"PAPER" }));
 
   fetchFearGreed().then(fg => { bot.fearGreed=fg.value; });

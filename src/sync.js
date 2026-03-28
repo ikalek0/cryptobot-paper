@@ -123,4 +123,69 @@ function calcSyncStats(log, days=1) {
   return { winRate:recent.length?Math.round(wins/recent.length*100):0, avgPnl:+avgPnl.toFixed(2), nTrades:recent.length, daysTracked:days };
 }
 
-module.exports = { exportParams, evaluateIncomingParams, calcSyncStats };
+
+// ── SYNC DIARIO SELECTIVO: envía solo lo aprendido hoy ───────────────────────
+// Paper exporta al live los parámetros que funcionaron MEJOR hoy,
+// no una comparación global. Live los adopta si hoy fue positivo.
+function exportDailyLearning(bot, liveUrl, secret) {
+  if (!liveUrl) return;
+  
+  const today = new Date().toDateString();
+  const todaySells = (bot.log||[]).filter(l=>l.type==="SELL"&&new Date(l.ts).toDateString()===today);
+  if (todaySells.length < 3) {
+    console.log(`[SYNC-DAILY] Solo ${todaySells.length} ops hoy, no hay suficiente para aprender`);
+    return;
+  }
+  
+  const wins   = todaySells.filter(l=>l.pnl>0).length;
+  const winRate = Math.round(wins/todaySells.length*100);
+  const avgPnl  = todaySells.reduce((s,l)=>s+(l.pnl||0),0)/todaySells.length;
+  
+  // Extraer qué aprendió hoy el bot
+  const dailyLearning = {
+    date: today,
+    winRate, avgPnl: +avgPnl.toFixed(2), nTrades: todaySells.length,
+    // Parámetros del optimizador actual
+    optimizerParams: bot.optimizer?.getParams() || {},
+    // Pares con mejor rendimiento hoy
+    topPairs: Object.entries(
+      todaySells.reduce((acc, t) => {
+        if (!acc[t.symbol]) acc[t.symbol] = {wins:0,n:0,pnl:0};
+        acc[t.symbol].n++;
+        acc[t.symbol].pnl += t.pnl||0;
+        if(t.pnl>0) acc[t.symbol].wins++;
+        return acc;
+      }, {})
+    ).map(([sym,st]) => ({symbol:sym, wr:Math.round(st.wins/st.n*100), avgPnl:+(st.pnl/st.n).toFixed(2), n:st.n}))
+     .sort((a,b)=>b.wr-a.wr).slice(0,6),
+    // Régimen del mercado predominante hoy
+    regime: bot.marketRegime,
+    // Q-Learning top states aprendidos hoy (comprimido)
+    qTopStates: bot.qLearning ? Object.entries(bot.qLearning.Q||{})
+      .filter(([,v])=>Math.max(...Object.values(v))>0.1)
+      .slice(0,20)
+      .map(([state,actions])=>({state, best:Object.entries(actions).sort((a,b)=>b[1]-a[1])[0]}))
+      : [],
+  };
+  
+  const positive = winRate >= 50 && avgPnl > 0;
+  const body = JSON.stringify({ secret, dailyLearning, positive });
+  const sig  = crypto.createHmac("sha256", secret).update(body).digest("hex");
+  
+  try {
+    const url = new URL("/api/sync/daily", liveUrl);
+    const mod = url.protocol==="https:" ? https : http;
+    const req = mod.request({
+      hostname: url.hostname, path: url.pathname, method: "POST",
+      headers: {"Content-Type":"application/json","Content-Length":Buffer.byteLength(body),"X-Signature":sig}
+    }, res => {
+      let d=""; res.on("data",c=>d+=c);
+      res.on("end",()=>{ try{const r=JSON.parse(d);console.log(`[SYNC-DAILY] ${r.adopted?"✅ Adoptado":"⏸ Ignorado"}: ${r.reason}`);}catch(e){} });
+    });
+    req.on("error",e=>console.warn("[SYNC-DAILY]",e.message));
+    req.setTimeout(8000,()=>req.destroy()); 
+    req.write(body); req.end();
+  } catch(e) { console.warn("[SYNC-DAILY]", e.message); }
+}
+
+module.exports = { exportParams, evaluateIncomingParams, calcSyncStats, exportDailyLearning };
