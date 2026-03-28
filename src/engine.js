@@ -129,8 +129,11 @@ function signalMeanReversion(sym,history,params){
   const rsiVal=rsi(h),atrVal=atr(h),atrPct=(atrVal/last)*100;
   const bbRange=bb.upper-bb.lower||1,bbPos=(last-bb.lower)/bbRange;
   let score=50,signal="HOLD",reason="";
-  if(bbPos<0.2&&rsiVal<40){score=75+Math.round((0.2-bbPos)*100);signal="BUY";reason=`MEAN REV · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobreventa)`;}
-  else if(bbPos>0.8&&rsiVal>60){score=25-Math.round((bbPos-0.8)*100);signal="SELL";reason=`MEAN REV · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobrecompra)`;}
+  // MR requiere señal más fuerte: RSI<35 Y BB<15% (no solo 40% y 20%)
+  if(bbPos<0.15&&rsiVal<35){score=78+Math.round((0.15-bbPos)*150);signal="BUY";reason=`MEAN REV FUERTE · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobreventa clara)`;}
+  else if(bbPos<0.25&&rsiVal<42){score=65+Math.round((0.25-bbPos)*80);signal="BUY";reason=`MEAN REV · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobreventa)`;}
+  else if(bbPos>0.85&&rsiVal>65){score=22-Math.round((bbPos-0.85)*100);signal="SELL";reason=`MEAN REV FUERTE · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobrecompra clara)`;}
+  else if(bbPos>0.75&&rsiVal>58){score=35-Math.round((bbPos-0.75)*80);signal="SELL";reason=`MEAN REV · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobrecompra)`;}
   else{score=50+Math.round((0.5-bbPos)*20);reason=`En rango · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)}`;}
   score=Math.max(5,Math.min(95,score));
   signal=score>=params.minScore?"BUY":score<=(100-params.minScore)?"SELL":"HOLD";
