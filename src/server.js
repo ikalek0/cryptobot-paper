@@ -121,6 +121,7 @@ function calcConsecutive(sells){
 }
 
 let bot;
+let tgControls = null; // control remoto Telegram
 (async () => {
   const saved = await loadState();
   bot = new CryptoBotFinal(saved);
