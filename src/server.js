@@ -307,8 +307,10 @@ function startLoop() {
 
   }, TICK_MS);
 
-  server.listen(PORT, ()=>console.log(`\n📋 CRYPTOBOT PAPER en http://localhost:${PORT} | Capital: $${CAPITAL_USDT} USDT\n`));
 }
+
+// Servidor arranca INMEDIATAMENTE — healthcheck pasa, WS disponible de inmediato
+server.listen(PORT, ()=>console.log(`\n📋 CRYPTOBOT PAPER en http://localhost:${PORT} | Capital: $${CAPITAL_USDT} USDT\n`));
 
 wss.on("connection", ws=>{
   if(bot) ws.send(JSON.stringify({type:"state",data:{...bot.getState(),instance:"PAPER"}}));
