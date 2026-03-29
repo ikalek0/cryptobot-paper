@@ -375,7 +375,15 @@ class CryptoBotFinal {
         // Actualizar pattern memory y Q-Learning
         const win=pnl>0;
         this.patternMemory.recordTrade(symbol,{rsiEntry:pos.rsiEntry||50,bbEntry:pos.bbEntry,entryPrice:pos.entryPrice,regime:pos.regime||this.marketRegime,pnlPct:pnl/100,win});
-        this.qLearning.recordTradeOutcome(pos.entryState,pnl/100);
+        // Calcular nextState real (estado actual al cerrar)
+        const closeH=this.history[symbol]||[cp];
+        const closeRsi=rsi(closeH),closeBB=bollingerBands(closeH);
+        const closeBBZone=cp<closeBB.lower?"below_lower":cp<closeBB.mid?"lower_half":cp<closeBB.upper?"upper_half":"above_upper";
+        const closeAtr=atr(closeH)/(cp*0.01);
+        const closeTrend=this.intradayTrend.getTrend(symbol);
+        const closeVolRatio=getVolumeAnomaly(this.volumeHistory,symbol).ratio;
+        const nextState=this.qLearning.encodeState({rsi:closeRsi,bbZone:closeBBZone,regime:this.marketRegime,trend:closeTrend.direction,volumeRatio:closeVolRatio,atrLevel:closeAtr});
+        this.qLearning.recordTradeOutcome(pos.entryState,pnl/100,nextState);
         this.qLearning.decayEpsilon();
         if(pos.ensembleVotes) this.ensemble.updateWeights(pos.ensembleVotes,win);
         if(Math.random()<0.05) this.patternMemory.updateCorrelations();
@@ -436,9 +444,10 @@ class CryptoBotFinal {
           const atrLevel=atrVal/(price*0.01);
           const trendData=this.intradayTrend.getTrend(sig.symbol);
 
-          const stateKey=this.qLearning.encodeState({rsi:rsiVal,bbZone,regime:this.marketRegime,trend:trendData.direction,volumeRatio:1.0,atrLevel});
+          const volData=getVolumeAnomaly(this.volumeHistory,sig.symbol);
+          const stateKey=this.qLearning.encodeState({rsi:rsiVal,bbZone,regime:this.marketRegime,trend:trendData.direction,volumeRatio:volData.ratio,atrLevel});
           const qAction=this.qLearning.chooseAction(stateKey);
-          const ensResult=this.ensemble.vote({rsi:rsiVal,bb,bbZone,price,regime:this.marketRegime,ema20,ema50,volumeRatio:1.0,trend:trendData.direction,atr:atrVal});
+          const ensResult=this.ensemble.vote({rsi:rsiVal,bb,bbZone,price,regime:this.marketRegime,ema20,ema50,volumeRatio:volData.ratio,trend:trendData.direction,atr:atrVal});
 
           // Fase 1: sin filtro ensemble/Q — opera todo para aprender
           // Fase 2: solo bloquea si ensemble muy negativo
@@ -446,11 +455,15 @@ class CryptoBotFinal {
           // ── Filtro por fases: más estricto a medida que el bot aprende ──────
           // Fase 1 (exploración): aprender de todo, solo filtrar scores muy bajos
           if(learningPhase===1 && sig.score<25) continue;
-          // Fase 2 (refinamiento): ensemble debe confirmar mínimamente O Q-Learning BUY
+          // Fase 2: ensemble O Q confirma
           if(learningPhase===2 && ensResult.buyRatio<0.30 && qAction!=="BUY") continue;
-          // Fase 3 (producción): consenso real exigido
+          // Fase 3: consenso real
           if(learningPhase===3 && !((qAction==="BUY"&&ensResult.buyRatio>=0.40)||ensResult.buyRatio>=0.55)) continue;
-          // MR: solo bloquear si sobrecompra clara (RSI>55 y BB>50%)
+          // PatternMemory: boost score si patrón conocido es favorable, bloquear si negativo
+          const pm=this.patternMemory.getPatternScore(sig.symbol,rsiVal,bollingerBands(h),price,this.marketRegime);
+          if(pm && pm.count>=5 && pm.winRate<0.30) continue; // patrón probadamente malo
+          const pmBoost = pm && pm.count>=3 && pm.winRate>0.55 ? 1.15 : 1.0; // patrón bueno → boost tamaño
+          // MR: solo bloquear sobrecompra clara
           // Extra: no entrar si BTC cayó >2% en las últimas 5 velas (contagio bearish)
           const btcH=this.history["BTCUSDT"]||[];
           const btcMom5=btcH.length>5?((btcH[btcH.length-1]-btcH[btcH.length-6])/btcH[btcH.length-6]*100):0;
@@ -460,7 +473,7 @@ class CryptoBotFinal {
           const volAnom = getVolumeAnomaly(this.volumeHistory, sig.symbol);
           const volBoost = volAnom.anomaly && sig.score > 55 ? 1.3 : 1.0;
           const corrMult = this.corrManager.getSizeMultiplier(sig.symbol, this.portfolio, this.prices, sig.score);
-          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*corrMult*volBoost;
+          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*corrMult*volBoost*pmBoost;
           if(invest<10||invest>availCash)continue;
           const qty=invest*(1-fee)/price,atrV=atr(h,14);
           const minStop=price*0.975,stopLoss=Math.min(price-Math.max(this.profile.atrMultiplier*atrV,price*0.025),minStop);

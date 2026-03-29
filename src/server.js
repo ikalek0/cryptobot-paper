@@ -301,7 +301,10 @@ function startLoop() {
       }
     }
 
-    broadcast({ type:"tick", data:{ ...bot.getState(), signals, newTrades, circuitBreaker, optimizerResult, binanceLive, instance:"PAPER", marketDefensive:marketGuard.isDefensive(), tradingHour:getTradingScore(), dailyPnlPct:bot._dailyPnlPct||0, momentumMult:bot.hourMultiplier } });
+    const paperTotalTrades=bot.log.filter(l=>l.type==="SELL").length;
+const paperPhase=paperTotalTrades<100?1:paperTotalTrades<500?2:3;
+const paperLimit=paperPhase===1?2000:paperPhase===2?500:300;
+broadcast({ type:"tick", data:{ ...bot.getState(), signals, newTrades, circuitBreaker, optimizerResult, binanceLive, instance:"PAPER", marketDefensive:marketGuard.isDefensive(), tradingHour:getTradingScore(), dailyPnlPct:bot._dailyPnlPct||0, momentumMult:bot.hourMultiplier, dailyLimit:paperLimit, learningPhase:paperPhase } });
 
     // Enviar equity a BAFIR como instancia paper
     if(ticks%60===0) sendEquityToBafirPaper(bot.totalValue());

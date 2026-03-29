@@ -48,12 +48,12 @@ class QLearning {
   }
 
   // ── Record outcome of a trade ────────────────────────────────────────────
-  recordTradeOutcome(entryState, pnlPct) {
-    if (!this.lastState || !this.lastAction) return;
-    // Reward: scaled pnl, capped
+  recordTradeOutcome(entryState, pnlPct, nextState) {
+    // Reward: scaled pnl, capped at ±2
     const reward = Math.max(-2, Math.min(2, pnlPct * 20));
-    const nextQ = this.encodeState_fromLast();
-    this.update(this.lastState, this.lastAction, reward, nextQ || this.lastState);
+    const resolvedNext = nextState || entryState;
+    this.update(entryState, this.lastAction || "BUY", reward, resolvedNext);
+    this.lastState = null; this.lastAction = null;
   }
 
   encodeState_fromLast() { return this.lastState; }
@@ -171,8 +171,13 @@ class EnsembleVoter {
 
 // ── Individual strategy functions ─────────────────────────────────────────────
 function stratEmaRsiBull({ rsi, regime, price, ema20, ema50, trend }) {
-  if (regime !== 'BULL') return { vote: 'SKIP', confidence: 0.6 };
-  if (rsi < 40 && price > ema20 && ema20 > ema50) return { vote: 'BUY', confidence: 0.7 + (40 - rsi) / 100 };
+  if (regime === 'BEAR') return { vote: 'SKIP', confidence: 0.65 };
+  // BULL: strong buy signal
+  if (regime === 'BULL' && rsi < 45 && price > ema20 && ema20 > ema50)
+    return { vote: 'BUY', confidence: 0.75 + (45 - rsi) / 100 };
+  // LATERAL: EMA aligned + RSI oversold
+  if (regime === 'LATERAL' && rsi < 38 && price > ema50)
+    return { vote: 'BUY', confidence: 0.60 };
   return { vote: 'SKIP', confidence: 0.5 };
 }
 
@@ -184,10 +189,11 @@ function stratMeanReversion({ rsi, bbZone, regime, price, bb }) {
 }
 
 function stratMomentum({ rsi, trend, volumeRatio, regime }) {
-  if (trend === 'up' && rsi > 45 && rsi < 65 && volumeRatio > 1.2 && regime !== 'BEAR')
-    return { vote: 'BUY', confidence: 0.65 };
-  if (trend === 'down') return { vote: 'SKIP', confidence: 0.6 };
-  return { vote: 'SKIP', confidence: 0.5 };
+  if (regime === 'BEAR') return { vote: 'SKIP', confidence: 0.65 };
+  if (trend === 'up' && rsi > 40 && rsi < 65 && volumeRatio >= 0.8)
+    return { vote: 'BUY', confidence: 0.55 + Math.min(0.2, (volumeRatio-0.8)*0.25) };
+  if (trend === 'down' && rsi > 60) return { vote: 'SKIP', confidence: 0.65 };
+  return { vote: 'SKIP', confidence: 0.45 };
 }
 
 function stratBearRebound({ rsi, regime, bbZone }) {
@@ -197,8 +203,10 @@ function stratBearRebound({ rsi, regime, bbZone }) {
 }
 
 function stratVolumeSpike({ volumeRatio, rsi, bbZone }) {
-  if (volumeRatio > 2.0 && rsi < 40 && bbZone !== 'above_upper')
-    return { vote: 'BUY', confidence: 0.6 };
+  if (volumeRatio > 1.5 && rsi < 45 && bbZone !== 'above_upper')
+    return { vote: 'BUY', confidence: 0.5 + Math.min(0.25, (volumeRatio-1.5)*0.2) };
+  if (volumeRatio > 1.2 && rsi < 38 && (bbZone === 'below_lower' || bbZone === 'lower_half'))
+    return { vote: 'BUY', confidence: 0.55 };
   return { vote: 'SKIP', confidence: 0.45 };
 }
 
