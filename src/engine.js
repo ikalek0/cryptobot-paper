@@ -19,25 +19,25 @@ const MAX_DRAWDOWN_PCT = 0.15;
 // PAPER: sin circuit breaker ni blacklist — aprender en todas las condiciones
 
 const PAIRS = [
-  { symbol:"BTCUSDT",  name:"Bitcoin",   short:"BTC",  category:"L1",   group:"major" },
-  { symbol:"ETHUSDT",  name:"Ethereum",  short:"ETH",  category:"L1",   group:"major" },
-  { symbol:"SOLUSDT",  name:"Solana",    short:"SOL",  category:"L1",   group:"alt1"  },
-  { symbol:"BNBUSDT",  name:"BNB",       short:"BNB",  category:"L1",   group:"alt1"  },
-  { symbol:"AVAXUSDT", name:"Avalanche", short:"AVAX", category:"L1",   group:"alt2"  },
-  { symbol:"ADAUSDT",  name:"Cardano",   short:"ADA",  category:"L1",   group:"alt2"  },
-  { symbol:"DOTUSDT",  name:"Polkadot",  short:"DOT",  category:"L1",   group:"alt2"  },
-  { symbol:"LINKUSDT", name:"Chainlink", short:"LINK", category:"DeFi", group:"defi"  },
-  { symbol:"UNIUSDT",  name:"Uniswap",   short:"UNI",  category:"DeFi", group:"defi"  },
-  { symbol:"AAVEUSDT", name:"Aave",      short:"AAVE", category:"DeFi", group:"defi"  },
-  { symbol:"XRPUSDT",  name:"Ripple",    short:"XRP",  category:"Pago", group:"pay"   },
-  { symbol:"LTCUSDT",  name:"Litecoin",  short:"LTC",  category:"Pago", group:"pay"   },
+  { symbol:"BTCUSDC",  name:"Bitcoin",   short:"BTC",  category:"L1",   group:"major" },
+  { symbol:"ETHUSDC",  name:"Ethereum",  short:"ETH",  category:"L1",   group:"major" },
+  { symbol:"SOLUSDC",  name:"Solana",    short:"SOL",  category:"L1",   group:"alt1"  },
+  { symbol:"BNBUSDC",  name:"BNB",       short:"BNB",  category:"L1",   group:"alt1"  },
+  { symbol:"AVAXUSDC", name:"Avalanche", short:"AVAX", category:"L1",   group:"alt2"  },
+  { symbol:"ADAUSDC",  name:"Cardano",   short:"ADA",  category:"L1",   group:"alt2"  },
+  { symbol:"DOTUSDC",  name:"Polkadot",  short:"DOT",  category:"L1",   group:"alt2"  },
+  { symbol:"LINKUSDC", name:"Chainlink", short:"LINK", category:"DeFi", group:"defi"  },
+  { symbol:"UNIUSDC",  name:"Uniswap",   short:"UNI",  category:"DeFi", group:"defi"  },
+  { symbol:"AAVEUSDC", name:"Aave",      short:"AAVE", category:"DeFi", group:"defi"  },
+  { symbol:"XRPUSDC",  name:"Ripple",    short:"XRP",  category:"Pago", group:"pay"   },
+  { symbol:"LTCUSDC",  name:"Litecoin",  short:"LTC",  category:"Pago", group:"pay"   },
   // Nuevos pares
-  { symbol:"MATICUSDT",name:"Polygon",   short:"MATIC",category:"L2",   group:"l2"    },
-  { symbol:"OPUSDT",   name:"Optimism",  short:"OP",   category:"L2",   group:"l2"    },
-  { symbol:"ARBUSDT",  name:"Arbitrum",  short:"ARB",  category:"L2",   group:"l2"    },
-  { symbol:"ATOMUSDT", name:"Cosmos",    short:"ATOM", category:"L1",   group:"alt3"  },
-  { symbol:"NEARUSDT", name:"NEAR",      short:"NEAR", category:"L1",   group:"alt3"  },
-  { symbol:"APTUSDT",  name:"Aptos",     short:"APT",  category:"L1",   group:"alt3"  },
+  { symbol:"POLUSDC",name:"Polygon (POL)",   short:"POL",category:"L2",   group:"l2"    },
+  { symbol:"OPUSDC",   name:"Optimism",  short:"OP",   category:"L2",   group:"l2"    },
+  { symbol:"ARBUSDC",  name:"Arbitrum",  short:"ARB",  category:"L2",   group:"l2"    },
+  { symbol:"ATOMUSDC", name:"Cosmos",    short:"ATOM", category:"L1",   group:"alt3"  },
+  { symbol:"NEARUSDC", name:"NEAR",      short:"NEAR", category:"L1",   group:"alt3"  },
+  { symbol:"APTUSDC",  name:"Aptos",     short:"APT",  category:"L1",   group:"alt3"  },
 ];
 
 const CATEGORIES = {
@@ -317,7 +317,7 @@ class CryptoBotFinal {
     this.tick++;this.checkDailyReset();
     const tv=this.totalValue();
     const cb={triggered:false,drawdown:0};
-    this.marketRegime=detectRegime(this.history["BTCUSDT"]);
+    this.marketRegime=detectRegime(this.history["BTCUSDC"]);
     const drawdownAlert={triggered:false,drawdownPct:0};
 
     const wr=this.recentWinRate(),dailyLimit=getDailyLimit(this.marketRegime,wr);
@@ -466,10 +466,10 @@ class CryptoBotFinal {
           const pmBoost = pm && pm.count>=3 && pm.winRate>0.55 ? 1.15 : 1.0; // patrón bueno → boost tamaño
           // MR: solo bloquear sobrecompra clara
           // Extra: no entrar si BTC cayó >2% en las últimas 5 velas (contagio bearish)
-          const btcH=this.history["BTCUSDT"]||[];
+          const btcH=this.history["BTCUSDC"]||[];
           const btcMom5=btcH.length>5?((btcH[btcH.length-1]-btcH[btcH.length-6])/btcH[btcH.length-6]*100):0;
           // BTC guard solo en caídas severas (-4%) para no bloquear rebotes normales
-          if(btcMom5<-4 && sig.symbol!=="BTCUSDT" && this.marketRegime==="LATERAL") continue;
+          if(btcMom5<-4 && sig.symbol!=="BTCUSDC" && this.marketRegime==="LATERAL") continue;
 
           const volAnom = getVolumeAnomaly(this.volumeHistory, sig.symbol);
           const volBoost = volAnom.anomaly && sig.score > 55 ? 1.3 : 1.0;

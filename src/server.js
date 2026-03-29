@@ -163,7 +163,7 @@ scheduleDailySync();
   fetchFearGreed().then(fg => { bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; });
 
   // Simulación histórica al arrancar (no bloquea el bot)
-  const HIST_SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","ADAUSDT","XRPUSDT","LINKUSDT","AVAXUSDT"];
+  const HIST_SYMBOLS = ["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC","ADAUSDC","XRPUSDC","LINKUSDC","AVAXUSDC"];
   runHistoricalSimulation(HIST_SYMBOLS, "1h")
     .then(results => {
       bot.historicalResults = results;
@@ -216,7 +216,7 @@ function startLoop() {
     if(!bot) return;
     simulatePrices();
 
-    const marketState=marketGuard.update(bot.prices["BTCUSDT"]);
+    const marketState=marketGuard.update(bot.prices["BTCUSDC"]);
     if(marketState?.defensive&&!wasDefensive){ tg.notifyDefensiveMode(marketState.btcDrawdown); wasDefensive=true; }
     if(!marketState?.defensive&&wasDefensive){ tg.notifyDefensiveOff(); wasDefensive=false; }
 
@@ -284,7 +284,7 @@ function startLoop() {
       lastNightlyReplay=replayKey;
       console.log("[PAPER] Replay nocturno + descargando klines de Binance…");
       // Descargar klines reales de Binance para enriquecer el replay
-      const klines=await fetchAllKlines(["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","ADAUSDT","XRPUSDT"],"1h",500).catch(()=>({}));
+      const klines=await fetchAllKlines(["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC","ADAUSDC","XRPUSDC"],"1h",500).catch(()=>({}));
       const best=runNightlyReplay(bot.history, bot.optimizer.getParams(), klines);
       const cur=bot.optimizer.getParams();
       if(best.winRate>60&&(best.params.emaFast!==cur.emaFast||best.params.minScore!==cur.minScore)){
@@ -316,7 +316,7 @@ broadcast({ type:"tick", data:{ ...bot.getState(), signals, newTrades, circuitBr
 }
 
 // Servidor arranca INMEDIATAMENTE — healthcheck pasa, WS disponible de inmediato
-server.listen(PORT, ()=>console.log(`\n📋 CRYPTOBOT PAPER en http://localhost:${PORT} | Capital: $${CAPITAL_USDT} USDT\n`));
+server.listen(PORT, ()=>console.log(`\n📋 CRYPTOBOT PAPER en http://localhost:${PORT} | Capital: $${CAPITAL_USDT} USDC\n`));
 
 wss.on("connection", ws=>{
   // Enviar estado inicial
