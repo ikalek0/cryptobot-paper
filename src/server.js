@@ -160,7 +160,7 @@ scheduleDailySync();
 
   tgControls = tg.startCommandListener(() => ({...bot.getState(),instance:"PAPER",dailyPnlPct:bot._dailyPnlPct||0,momentumMult:bot.hourMultiplier||1,cryptoPanic:cryptoPanic.getStatus()}));
 
-  fetchFearGreed().then(fg => { bot.fearGreed=fg.value; });
+  fetchFearGreed().then(fg => { bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; });
 
   // Simulación histórica al arrancar (no bloquea el bot)
   const HIST_SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","ADAUSDT","XRPUSDT","LINKUSDT","AVAXUSDT"];
@@ -269,8 +269,8 @@ function startLoop() {
     if(!circuitBreaker?.triggered) cbNotified=false;
     if(optimizerResult?.changes?.length>0) tg.notifyOptimizer(optimizerResult);
 
-    // Fear & Greed cada hora
-    if(Date.now()-lastFearGreedCheck>3600000){
+    // Fear & Greed cada 30min (alternative.me publica 1x/día, pero puede actualizarse)
+    if(Date.now()-lastFearGreedCheck>1800000){
       lastFearGreedCheck=Date.now();
       fetchFearGreed().then(fg=>{ bot.fearGreed=fg.value; });
     }
