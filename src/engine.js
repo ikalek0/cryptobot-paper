@@ -62,7 +62,7 @@ function updateMultiTF(tfHistory, symbol, price, tick) {
 }
 
 function getDailyLimit(regime, wr) {
-  let base = regime==="BULL"?20:regime==="LATERAL"?8:regime==="BEAR"?4:8;
+  let base = regime==="BULL"?25:regime==="LATERAL"?15:regime==="BEAR"?5:10;
   if(wr!==null){if(wr>65)base=Math.round(base*1.3);else if(wr<45)base=Math.round(base*0.6);else if(wr<50)base=Math.round(base*0.8);}
   return Math.max(3,Math.min(25,base));
 }
@@ -120,7 +120,7 @@ function detectRegime(h) {
   const vol=stdDev(h.slice(-20).map((v,i,a)=>i===0?0:(v-a[i-1])/a[i-1]));
 
   // ADX fuerte + dirección clara = tendencia
-  if (adx > 22) {
+  if (adx > 25) {
     if (last>ma20 && trend20>1.5 && trend5>0) return "BULL";
     if (last<ma20 && trend20<-1.5 && trend5<0) return "BEAR";
   }
@@ -170,9 +170,10 @@ function signalMeanReversion(sym,history,params){
   const rsiVal=rsi(h),atrVal=atr(h),atrPct=(atrVal/last)*100;
   const bbRange=bb.upper-bb.lower||1,bbPos=(last-bb.lower)/bbRange;
   let score=50,signal="HOLD",reason="";
-  // MR requiere señal más fuerte: RSI<35 Y BB<15% (no solo 40% y 20%)
-  if(bbPos<0.15&&rsiVal<35){score=78+Math.round((0.15-bbPos)*150);signal="BUY";reason=`MEAN REV FUERTE · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobreventa clara)`;}
-  else if(bbPos<0.25&&rsiVal<42){score=65+Math.round((0.25-bbPos)*80);signal="BUY";reason=`MEAN REV · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobreventa)`;}
+  // MR: RSI<40 Y BB<20% para señal normal, RSI<35 Y BB<12% para señal fuerte
+  if(bbPos<0.12&&rsiVal<35){score=82+Math.round((0.12-bbPos)*200);signal="BUY";reason=`MEAN REV FUERTE · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobreventa extrema)`;}
+  else if(bbPos<0.20&&rsiVal<40){score=68+Math.round((0.20-bbPos)*100);signal="BUY";reason=`MEAN REV · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobreventa)`;}
+  else if(bbPos<0.30&&rsiVal<45){score=58+Math.round((0.30-bbPos)*60);signal="BUY";reason=`MEAN REV DÉBIL · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)}`;}
   else if(bbPos>0.85&&rsiVal>65){score=22-Math.round((bbPos-0.85)*100);signal="SELL";reason=`MEAN REV FUERTE · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobrecompra clara)`;}
   else if(bbPos>0.75&&rsiVal>58){score=35-Math.round((bbPos-0.75)*80);signal="SELL";reason=`MEAN REV · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} (sobrecompra)`;}
   else{score=50+Math.round((0.5-bbPos)*20);reason=`En rango · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)}`;}
@@ -449,12 +450,12 @@ class CryptoBotFinal {
           if(learningPhase===2 && ensResult.buyRatio<0.30 && qAction!=="BUY") continue;
           // Fase 3 (producción): consenso real exigido
           if(learningPhase===3 && !((qAction==="BUY"&&ensResult.buyRatio>=0.40)||ensResult.buyRatio>=0.55)) continue;
-          // Extra: en LATERAL, exigir RSI más bajo para MR (evitar entrar en tendencia bajista)
-          if(sig.strategy==="MEAN_REVERSION" && sig.rsiVal>42 && sig.bbPos>0.25) continue;
+          // MR: solo bloquear si sobrecompra clara (RSI>55 y BB>50%)
           // Extra: no entrar si BTC cayó >2% en las últimas 5 velas (contagio bearish)
           const btcH=this.history["BTCUSDT"]||[];
           const btcMom5=btcH.length>5?((btcH[btcH.length-1]-btcH[btcH.length-6])/btcH[btcH.length-6]*100):0;
-          if(btcMom5<-2 && sig.symbol!=="BTCUSDT" && this.marketRegime==="LATERAL") continue;
+          // BTC guard solo en caídas severas (-4%) para no bloquear rebotes normales
+          if(btcMom5<-4 && sig.symbol!=="BTCUSDT" && this.marketRegime==="LATERAL") continue;
 
           const volAnom = getVolumeAnomaly(this.volumeHistory, sig.symbol);
           const volBoost = volAnom.anomaly && sig.score > 55 ? 1.3 : 1.0;
