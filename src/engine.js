@@ -116,19 +116,24 @@ function detectRegime(h) {
   const ma50=h.slice(-50).reduce((a,b)=>a+b,0)/50;
   const trend20=(last-h[Math.max(0,h.length-20)])/h[Math.max(0,h.length-20)]*100;
   const trend5 =(last-h[Math.max(0,h.length-5)]) /h[Math.max(0,h.length-5)] *100;
+  const trend50=(last-h[Math.max(0,h.length-50)])/h[Math.max(0,h.length-50)]*100;
   const adx=calcADX(h, 14);
-  const vol=stdDev(h.slice(-20).map((v,i,a)=>i===0?0:(v-a[i-1])/a[i-1]));
 
-  // ADX fuerte + dirección clara = tendencia
-  if (adx > 25) {
-    if (last>ma20 && trend20>1.5 && trend5>0) return "BULL";
-    if (last<ma20 && trend20<-1.5 && trend5<0) return "BEAR";
-  }
-  // BTC caída rápida en 5 velas = BEAR aunque ADX no lo confirme aún
+  // BEAR fuerte: ADX alto + dirección bajista clara
+  if (adx > 25 && last<ma20 && trend20<-1.5 && trend5<0) return "BEAR";
+  // BEAR rápido: caída >3% en 5 velas
   if (trend5 < -3 && last < ma20) return "BEAR";
-  // Subida clara con MA alineadas = BULL
+
+  // BULL fuerte: ADX alto + dirección alcista
+  if (adx > 25 && last>ma20 && trend20>1.5 && trend5>0) return "BULL";
+  // BULL claro: MAs alineadas al alza
   if (last>ma20 && ma20>ma50 && trend20>3 && adx>18) return "BULL";
-  // Default: LATERAL (sin tendencia confirmada)
+
+  // LATERAL BAJISTA: downtrend lento sin fuerza suficiente para BEAR
+  // Esto ocurre en mercados como ahora (F&G=9, caída gradual)
+  if (last<ma20 && ma20<ma50 && trend20<-2 && trend50<-5) return "BEAR"; // tratar como BEAR
+  if (last<ma20 && trend20<-1.5) return "LATERAL"; // downtrend leve → lateral conservador
+
   return "LATERAL";
 }
 
@@ -187,9 +192,12 @@ function signalBear(sym,history,params){
   if(h.length<10)return{signal:"HOLD",score:30,reason:"Sin datos",rsiVal:50,atrPct:3,mom10:0,strategy:"BEAR"};
   const last=h[h.length-1],rsiVal=rsi(h),atrVal=atr(h),atrPct=(atrVal/last)*100;
   const bb=bollingerBands(h,20,2.5),bbPos=(last-bb.lower)/(bb.upper-bb.lower||1);
+  const mom5=h.length>5?((last-h[h.length-6])/h[h.length-6]*100):0;
   let score=30,signal="HOLD",reason=`BEAR · RSI ${rsiVal.toFixed(0)} · Esperando rebote extremo`;
-  if(rsiVal<25&&bbPos<0.1){score=70;signal="BUY";reason=`BEAR REBOTE · RSI ${rsiVal.toFixed(0)} · BB ${(bbPos*100).toFixed(0)}%`;}
-  return{signal,score,reason,rsiVal:+rsiVal.toFixed(1),atrPct:+atrPct.toFixed(2),mom10:0,strategy:"BEAR"};
+  // Rebote extremo: RSI<20 + BB muy bajo + momentum 5v empezando a girar
+  if(rsiVal<20&&bbPos<0.05){score=75;signal="BUY";reason=`BEAR REBOTE EXTREMO · RSI ${rsiVal.toFixed(0)} · BB ${(bbPos*100).toFixed(0)}%`;}
+  else if(rsiVal<25&&bbPos<0.10&&mom5>0){score=62;signal="BUY";reason=`BEAR REBOTE · RSI ${rsiVal.toFixed(0)} · BB ${(bbPos*100).toFixed(0)}% · Mom girando`;}
+  return{signal,score,reason,rsiVal:+rsiVal.toFixed(1),atrPct:+atrPct.toFixed(2),mom10:0,bbPos:+bbPos.toFixed(2),strategy:"BEAR"};
 }
 
 function computeSignal(sym,history,params,regime="UNKNOWN"){
@@ -368,7 +376,10 @@ class CryptoBotFinal {
       this.portfolio[symbol].trailingHigh=+ts.maxHigh.toFixed(4);
       this.portfolio[symbol].profitLocked=+ts.profitLocked.toFixed(2);
       const sig=signals.find(s=>s.symbol===symbol);
-      const mrExit=this.marketRegime==="LATERAL"&&sig?.bbPos>0.90&&sig?.rsiVal>70; // más estricto en paper
+      // MR exit: en LATERAL tomar beneficio en BB 65% (no esperar 90%)
+      // Esto mejora WR aunque reduce tamaño de ganancia individual
+      const mrTarget = this.marketRegime==="LATERAL" ? 0.65 : 0.85;
+      const mrExit=sig?.bbPos>mrTarget&&sig?.rsiVal>58;
       const bearSell=this.marketRegime==="BEAR"&&pos.profitLocked<0&&ts.profitLocked<0;
       // En paper: no salir solo por señal SELL débil — esperar stop o trailing con beneficio real
       const signalExit=sig?.signal==="SELL"&&sig?.score<=(100-params.minScore-10)&&ts.profitLocked>0.5;
@@ -396,7 +407,18 @@ class CryptoBotFinal {
         if(pos.ensembleVotes) this.ensemble.updateWeights(pos.ensembleVotes,win);
         if(Math.random()<0.05) this.patternMemory.updateCorrelations();
         delete this.portfolio[symbol];this.trailing.remove(symbol);
-        if(pnl<0)this.reentryTs[symbol]=Date.now();
+        if(pnl<0){
+          this.reentryTs[symbol]=Date.now();
+          // Circuit breaker inteligente: 5 pérdidas seguidas → pausa 30min
+          this._consecutiveLosses=(this._consecutiveLosses||0)+1;
+          if(this._consecutiveLosses>=5&&!this._smartPause){
+            this._smartPause=Date.now()+30*60*1000;
+            console.log(`[PAPER][SMART-CB] 5 pérdidas seguidas → pausa 30min`);
+          }
+        } else {
+          this._consecutiveLosses=0;
+        }
+        if(this._smartPause&&Date.now()>this._smartPause) this._smartPause=null;
         const trade={type:"SELL",symbol,name:pos.name,qty:+pos.qty.toFixed(6),price:+cp.toFixed(4),pnl:+pnl.toFixed(2),reason,mode:this.mode,fee:+(pos.qty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"MOMENTUM"};
         newTrades.push(trade);this.dailyTrades.count++;
         this.optimizer.recordTrade(pnl,reason);updatePairScore(this.pairScores,symbol,pnl);
@@ -405,7 +427,8 @@ class CryptoBotFinal {
     }
 
     // NUEVAS ENTRADAS — sin blacklist, con ensemble+qlearning
-    if(!dailyLimitReached&&!this.marketDefensive){
+    const smartPauseActive=this._smartPause&&Date.now()<this._smartPause;
+    if(!dailyLimitReached&&!this.marketDefensive&&!smartPauseActive){
       const nOpen=Object.keys(this.portfolio).length;
       // Posiciones máximas según fase
       const maxPos = PAIRS.length; // paper: siempre máximas posiciones para aprender
