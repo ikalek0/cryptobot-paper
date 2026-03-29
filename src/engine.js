@@ -9,7 +9,7 @@ const { QLearning, EnsembleVoter } = require("./qlearning");
 const { IntradayTrend }    = require("./intradayTrend");
 const { analyzeCounterfactual, CounterfactualMemory } = require("./counterfactual");
 
-const INITIAL_CAPITAL  = parseFloat(process.env.CAPITAL_USDT || "50000");
+const INITIAL_CAPITAL  = parseFloat(process.env.CAPITAL_USDC || process.env.CAPITAL_USDT || "50000");
 const MIN_CASH_RESERVE = 0.15;
 const PUMP_THRESHOLD   = 0.08;
 const REENTRY_COOLDOWN = 2 * 60 * 60 * 1000;
@@ -326,6 +326,12 @@ class CryptoBotFinal {
     if(this.tick===1||this.tick%1800===0) console.log(`[PAPER][FASE ${learningPhase}] Trades: ${totalTrades} | Régimen: ${this.marketRegime} | WR: ${wr||"—"}%`);
 
     // PAPER: límite diario muy alto para maximizar aprendizaje
+    // Aprendizaje adaptativo: si WR muy bajo, aprender a ser más selectivo
+    const recentWR = this.recentWinRate() || 50;
+    const isStruggling = recentWR < 25 && totalTrades > 50;
+    if (isStruggling && this.tick % 900 === 0) {
+      console.log(`[PAPER][APRENDIZAJE] WR bajo (${recentWR}%) → siendo más selectivo en entradas`);
+    }
     const paperDailyLimit = (learningPhase === 1 ? 5000 : learningPhase === 2 ? 2000 : 500) + (this._dailyLimitBoost||0);
     const dailyLimitReached=this.dailyTrades.count>=paperDailyLimit;
     const params=this.optimizer.getParams();
@@ -355,7 +361,8 @@ class CryptoBotFinal {
       const posAgeSec = (Date.now() - new Date(pos.ts).getTime()) / 1000;
       const posAgeLimitSec = 4 * 3600;
       const priceMovePct = Math.abs((cp - pos.entryPrice) / pos.entryPrice * 100);
-      const timeStop = posAgeSec > posAgeLimitSec && priceMovePct < 0.5 && (pos.profitLocked||0) < 0.3;
+      // Paper: sin time stop - que aprenda a aguantar posiciones
+      const timeStop = false;
 
       this.portfolio[symbol].trailingStop=+ts.stopPrice.toFixed(4);
       this.portfolio[symbol].trailingHigh=+ts.maxHigh.toFixed(4);
@@ -405,7 +412,9 @@ class CryptoBotFinal {
       if(nOpen<maxPos){
         const reserve=this.totalValue()*MIN_CASH_RESERVE,availCash=Math.max(0,this.cash-reserve);
         // Score mínimo progresivo
-        const regimeMin = learningPhase === 1 ? 20 : learningPhase === 2 ? 35 : (this.marketRegime==="BEAR"?55:45);
+        // Si WR muy bajo, exigir señales más fuertes para aprender qué funciona
+        const baseMin = learningPhase === 1 ? 20 : learningPhase === 2 ? 35 : (this.marketRegime==="BEAR"?55:45);
+        const regimeMin = isStruggling ? Math.min(baseMin + 15, 65) : baseMin;
         const fearAdj=this.fearGreed<25?1.2:this.fearGreed>80?0.6:1.0;
         const groupCount={};
         Object.keys(this.portfolio).forEach(sym=>{const p=PAIRS.find(p=>p.symbol===sym);if(p)groupCount[p.group]=(groupCount[p.group]||0)+1;});
@@ -477,7 +486,8 @@ class CryptoBotFinal {
           const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*corrMult*volBoost*pmBoost;
           if(invest<10||invest>availCash)continue;
           const qty=invest*(1-fee)/price,atrV=atr(h,14);
-          const minStop=price*0.975,stopLoss=Math.min(price-Math.max(this.profile.atrMultiplier*atrV,price*0.025),minStop);
+          // Paper: stop más amplio (5%) para dar tiempo a aprender, no salir en cada fluctuación
+          const minStop=price*0.950,stopLoss=Math.min(price-Math.max(this.profile.atrMultiplier*atrV,price*0.025),minStop);
           this.cash-=invest;
           this.portfolio[sig.symbol]={qty,entryPrice:price,stopLoss:+stopLoss.toFixed(4),trailingStop:+stopLoss.toFixed(4),trailingHigh:+price.toFixed(4),profitLocked:0,name:sig.name,ts:new Date().toISOString(),strategy:sig.strategy||"ENSEMBLE",rsiEntry:rsiVal,bbEntry:bb,regime:this.marketRegime,entryState:stateKey,ensembleVotes:ensResult.votes};
           const trade={type:"BUY",symbol:sig.symbol,name:sig.name,qty:+qty.toFixed(6),price:+price.toFixed(4),stopLoss:+stopLoss.toFixed(4),score:sig.score,pnl:null,mode:this.mode,fee:+(invest*fee).toFixed(4),ts:new Date().toISOString(),strategy:sig.strategy||"ENSEMBLE"};
@@ -522,7 +532,9 @@ class CryptoBotFinal {
       optimizerParams:this.optimizer.getParams(),
       optLog:this.optLog,profile:this.profile,
       pairScores:this.pairScores,marketRegime:this.marketRegime,
-      fearGreed:this.fearGreed,dailyTrades:this.dailyTrades,dailyLimit,
+      fearGreed:this.fearGreed,
+      fearGreedPublished:this.fearGreedPublished||null,
+      fearGreedSource:this.fearGreedSource||"unknown",dailyTrades:this.dailyTrades,dailyLimit,
       totalFees:+this.log.reduce((s,l)=>s+(l.fee||0),0).toFixed(2),
       contrafactualLog:this.contrafactualLog.slice(0,10),
       useBnb:this.useBnb,recentWinRate:wr,

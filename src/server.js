@@ -160,7 +160,7 @@ scheduleDailySync();
 
   tgControls = tg.startCommandListener(() => ({...bot.getState(),instance:"PAPER",dailyPnlPct:bot._dailyPnlPct||0,momentumMult:bot.hourMultiplier||1,cryptoPanic:cryptoPanic.getStatus()}));
 
-  fetchFearGreed().then(fg => { bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; });
+  fetchFearGreed().then(fg => { bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source}) publicado: ${fg.publishedAt||"desconocido"}`); });
 
   // Simulación histórica al arrancar (no bloquea el bot)
   const HIST_SYMBOLS = ["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC","ADAUSDC","XRPUSDC","LINKUSDC","AVAXUSDC"];
@@ -308,6 +308,33 @@ broadcast({ type:"tick", data:{ ...bot.getState(), signals, newTrades, circuitBr
 
     // Enviar equity a BAFIR como instancia paper
     if(ticks%60===0) sendEquityToBafirPaper(bot.totalValue());
+    // Sync Q-states al live cada hora (aprendizaje continuo, no solo a las 3am)
+    if(ticks%1800===0 && bot.qLearning) {
+      const qStats = bot.qLearning.getTopStates(20);
+      const goodStates = qStats.filter(s=>s.bestAction[1]>0.3);
+      if(goodStates.length>0) {
+        const body=JSON.stringify({
+          secret:process.env.SYNC_SECRET||"bafir_sync_secret_2024",
+          dailyLearning:{
+            winRate:bot.recentWinRate()||0,
+            avgPnl:0, nTrades:1,
+            regime:bot.marketRegime,
+            optimizerParams:bot.optimizer.getParams(),
+            qTopStates:goodStates,
+          },
+          positive:false, hasLearning:true
+        });
+        const liveUrl=process.env.LIVE_BOT_URL||"";
+        if(liveUrl){
+          const mod2=liveUrl.startsWith("https")?require("https"):require("http");
+          const u=new URL("/api/sync/daily",liveUrl);
+          const sig=require("crypto").createHmac("sha256",process.env.SYNC_SECRET||"bafir_sync_secret_2024").update(body).digest("hex");
+          const r2=mod2.request({hostname:u.hostname,path:u.pathname,method:"POST",headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(body),"X-Signature":sig}},()=>{});
+          r2.on("error",()=>{}); r2.write(body); r2.end();
+          console.log(`[PAPER→LIVE] Sync Q-states horario: ${goodStates.length} estados útiles`);
+        }
+      }
+    }
 
     if(ticks%20===0) save().catch(e=>console.error("[SAVE]",e));
 
