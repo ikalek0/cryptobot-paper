@@ -260,6 +260,11 @@ function startLoop() {
       if(trade.type==="SELL") {
         if(trade.pnl<0){ const wasBl=blacklist.isBlacklisted(trade.symbol); blacklist.recordLoss(trade.symbol); if(!wasBl&&blacklist.isBlacklisted(trade.symbol)) tg.notifyBlacklist(trade.symbol); }
         else blacklist.recordWin(trade.symbol);
+        // Notificar trades significativos
+        if(trade.type==="SELL"){
+          if(trade.pnl>=5) tg.notifyBigWin && tg.notifyBigWin(trade);
+          if(trade.pnl<=-4) tg.notifyBigLoss && tg.notifyBigLoss(trade);
+        }
       }
     }
 
@@ -272,7 +277,7 @@ function startLoop() {
     // Fear & Greed cada 30min (alternative.me publica 1x/día, pero puede actualizarse)
     if(Date.now()-lastFearGreedCheck>1800000){
       lastFearGreedCheck=Date.now();
-      fetchFearGreed().then(fg=>{ bot.fearGreed=fg.value; });
+      fetchFearGreed().then(fg=>{ bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source||"?"}) · ${fg.publishedAt?.slice(0,16)||"?"}`); });
     }
 
     // Noticias cada 10 min
