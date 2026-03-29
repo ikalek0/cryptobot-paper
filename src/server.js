@@ -38,7 +38,7 @@ function sendEquityToBafirPaper(value) {
   } catch(e){}
 }
 
-const blacklist   = new Blacklist(3, 12); // Cooldown más corto en paper (12h)
+const blacklist   = new Blacklist(5, 1); // Paper: 5 pérdidas → solo 1h ban (aprender de todo)
 const marketGuard = new MarketGuard();
 const cryptoPanic = new CryptoPanicDefense();
 cryptoPanic.start();
@@ -58,7 +58,7 @@ function broadcast(msg) {
   wss.clients.forEach(c => { if(c.readyState===WebSocket.OPEN) c.send(d); });
 }
 
-app.get("/api/state",  (_,res) => res.json(bot ? { ...bot.getState(), instance:"PAPER", blacklist:blacklist.getStatus() } : {loading:true,instance:"PAPER",totalValue:0}));
+app.get("/api/state",  (_,res) => res.json(bot ? { ...bot.getState(), instance:"PAPER", blacklist:blacklist.getStatus(), dailyPnlPct:bot._dailyPnlPct||0, momentumMult:bot.hourMultiplier||1, cryptoPanic:cryptoPanic?.getStatus?.()??null } : {loading:true,instance:"PAPER",totalValue:0}));
 app.get("/api/health", (_,res) => res.json({ ok:true, instance:"PAPER", tick:bot?.tick, uptime:process.uptime(), tv:bot?.totalValue() }));
 
 // Datos de aprendizaje (Q-Learning, ensemble, patrones, contrafactuales)

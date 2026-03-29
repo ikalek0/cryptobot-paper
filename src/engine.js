@@ -494,7 +494,7 @@ class CryptoBotFinal {
     const dd=(this.maxEquity-tv)/this.maxEquity;
     return{
       prices:this.prices,history:this.history,portfolio:this.portfolio,
-      cash:this.cash,log:this.log,equity:this.equity.map(e=>typeof e==="object"?e:{v:e,t:Date.now()}),tick:this.tick,
+      cash:this.cash,log:this.log.slice(0,100),equity:this.equity.map(e=>typeof e==="object"?e:{v:e,t:Date.now()}),tick:this.tick,
       mode:this.mode,totalValue:tv,returnPct:ret,
       winRate:sells?+((wins/sells)*100).toFixed(0):null,
       pairs:PAIRS,categories:CATEGORIES,
