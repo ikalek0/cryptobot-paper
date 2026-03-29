@@ -257,6 +257,7 @@ class CryptoBotFinal {
       this.prices=saved.prices||{};this.history=saved.history||{};this.portfolio=saved.portfolio||{};
       this.cash=saved.cash||INITIAL_CAPITAL;this.log=saved.log||[];this.equity=saved.equity||[INITIAL_CAPITAL];
       this.tick=saved.tick||0;this.mode=saved.mode||"PAPER";this.optLog=saved.optLog||[];
+      this.equityHistory=saved.equityHistory||[];
       this.pairScores=saved.pairScores||{};this.reentryTs=saved.reentryTs||{};
       this.dailyTrades=saved.dailyTrades||{date:"",count:0};this.useBnb=saved.useBnb!==undefined?saved.useBnb:true;
       this.contrafactualLog=saved.contrafactualLog||[];
@@ -325,7 +326,7 @@ class CryptoBotFinal {
     if(this.tick===1||this.tick%1800===0) console.log(`[PAPER][FASE ${learningPhase}] Trades: ${totalTrades} | Régimen: ${this.marketRegime} | WR: ${wr||"—"}%`);
 
     // PAPER: límite diario muy alto para maximizar aprendizaje
-    const paperDailyLimit = (learningPhase === 1 ? 2000 : learningPhase === 2 ? 500 : 300) + (this._dailyLimitBoost||0);
+    const paperDailyLimit = (learningPhase === 1 ? 5000 : learningPhase === 2 ? 2000 : 500) + (this._dailyLimitBoost||0);
     const dailyLimitReached=this.dailyTrades.count>=paperDailyLimit;
     const params=this.optimizer.getParams();
 
@@ -400,11 +401,11 @@ class CryptoBotFinal {
     if(!dailyLimitReached&&!this.marketDefensive){
       const nOpen=Object.keys(this.portfolio).length;
       // Posiciones máximas según fase
-      const maxPos = learningPhase === 1 ? PAIRS.length : learningPhase === 2 ? PAIRS.length : this.profile.maxOpenPositions*3;
+      const maxPos = PAIRS.length; // paper: siempre máximas posiciones para aprender
       if(nOpen<maxPos){
         const reserve=this.totalValue()*MIN_CASH_RESERVE,availCash=Math.max(0,this.cash-reserve);
         // Score mínimo progresivo
-        const regimeMin = learningPhase === 1 ? 30 : learningPhase === 2 ? 45 : (this.marketRegime==="BEAR"?60:50);
+        const regimeMin = learningPhase === 1 ? 20 : learningPhase === 2 ? 35 : (this.marketRegime==="BEAR"?55:45);
         const fearAdj=this.fearGreed<25?1.2:this.fearGreed>80?0.6:1.0;
         const groupCount={};
         Object.keys(this.portfolio).forEach(sym=>{const p=PAIRS.find(p=>p.symbol===sym);if(p)groupCount[p.group]=(groupCount[p.group]||0)+1;});
@@ -416,7 +417,7 @@ class CryptoBotFinal {
           if(this.portfolio[s.symbol])return false;
           if(s.isPumping)return false; // solo filtrar pumps extremos siempre
           // Cooldown corto en fase 1, normal en fase 3
-          const cooldown = learningPhase===1 ? 5*60*1000 : learningPhase===2 ? 30*60*1000 : REENTRY_COOLDOWN;
+          const cooldown = learningPhase===1 ? 60*1000 : learningPhase===2 ? 10*60*1000 : 30*60*1000; // paper: cooldown mínimo para aprender más
           const ll=this.reentryTs[s.symbol];if(ll&&Date.now()-ll<cooldown)return false;
           // Límite por grupo solo en fase 3
           if(learningPhase===3){const grp=PAIRS.find(p=>p.symbol===s.symbol)?.group;if(grp&&(groupCount[grp]||0)>=3)return false;}
@@ -455,10 +456,10 @@ class CryptoBotFinal {
           // ── Filtro por fases: más estricto a medida que el bot aprende ──────
           // Fase 1 (exploración): aprender de todo, solo filtrar scores muy bajos
           if(learningPhase===1 && sig.score<25) continue;
-          // Fase 2: ensemble O Q confirma
-          if(learningPhase===2 && ensResult.buyRatio<0.30 && qAction!=="BUY") continue;
-          // Fase 3: consenso real
-          if(learningPhase===3 && !((qAction==="BUY"&&ensResult.buyRatio>=0.40)||ensResult.buyRatio>=0.55)) continue;
+          // Fase 2: solo bloquear si ensemble muy negativo
+          if(learningPhase===2 && ensResult.buyRatio<0.15 && qAction==="SKIP") continue;
+          // Fase 3: consenso mínimo (más permisivo que antes para seguir aprendiendo)
+          if(learningPhase===3 && ensResult.buyRatio<0.25 && qAction==="SKIP") continue;
           // PatternMemory: boost score si patrón conocido es favorable, bloquear si negativo
           const pm=this.patternMemory.getPatternScore(sig.symbol,rsiVal,bollingerBands(h),price,this.marketRegime);
           if(pm && pm.count>=5 && pm.winRate<0.30) continue; // patrón probadamente malo
@@ -493,7 +494,13 @@ class CryptoBotFinal {
     }
 
     if(newTrades.length)this.log=[...newTrades,...this.log].slice(0,300);
-    this.equity=[...this.equity,{v:this.totalValue(),t:Date.now()}].slice(-500);
+    // Equity: guardamos cada tick para los últimos 500 puntos (tiempo real)
+    // + puntos downsampled cada 30 ticks para historial más largo
+    const ePoint={v:this.totalValue(),t:Date.now()};
+    this.equity=[...this.equity,ePoint].slice(-500);
+    // Historial largo: guardar 1 punto cada 30 ticks (~1 min en paper)
+    if(!this.equityHistory) this.equityHistory=[];
+    if(this.tick%30===0) this.equityHistory=[...this.equityHistory,ePoint].slice(-2000);
     const optResult=this.optimizer.optimize();
     if(optResult?.changes?.length>0)this.optLog=[optResult,...this.optLog].slice(0,30);
 
@@ -507,7 +514,7 @@ class CryptoBotFinal {
     const dd=(this.maxEquity-tv)/this.maxEquity;
     return{
       prices:this.prices,history:this.history,portfolio:this.portfolio,
-      cash:this.cash,log:this.log.slice(0,100),equity:this.equity.map(e=>typeof e==="object"?e:{v:e,t:Date.now()}),tick:this.tick,
+      cash:this.cash,log:this.log.slice(0,100),equity:this.equity.map(e=>typeof e==="object"?e:{v:e,t:Date.now()}),equityHistory:(this.equityHistory||[]).slice(-500),tick:this.tick,
       mode:this.mode,totalValue:tv,returnPct:ret,
       winRate:sells?+((wins/sells)*100).toFixed(0):null,
       pairs:PAIRS,categories:CATEGORIES,

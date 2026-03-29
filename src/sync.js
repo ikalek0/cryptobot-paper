@@ -132,8 +132,8 @@ function exportDailyLearning(bot, liveUrl, secret) {
   
   const today = new Date().toDateString();
   const todaySells = (bot.log||[]).filter(l=>l.type==="SELL"&&new Date(l.ts).toDateString()===today);
-  if (todaySells.length < 3) {
-    console.log(`[SYNC-DAILY] Solo ${todaySells.length} ops hoy, no hay suficiente para aprender`);
+  if (todaySells.length < 1) {
+    console.log(`[SYNC-DAILY] Sin ops hoy`);
     return;
   }
   
@@ -168,8 +168,10 @@ function exportDailyLearning(bot, liveUrl, secret) {
       : [],
   };
   
+  // Siempre enviar - live decide si adoptar basado en qué se aprendió
   const positive = winRate >= 50 && avgPnl > 0;
-  const body = JSON.stringify({ secret, dailyLearning, positive });
+  const hasLearning = dailyLearning.qTopStates.length > 0; // hay estados Q útiles
+  const body = JSON.stringify({ secret, dailyLearning, positive, hasLearning });
   const sig  = crypto.createHmac("sha256", secret).update(body).digest("hex");
   
   try {
