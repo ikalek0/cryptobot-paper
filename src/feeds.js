@@ -134,52 +134,96 @@ async function fetchAllKlines(pairs=["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"], i
 }
 
 // ── Replay nocturno con klines reales ─────────────────────────────────────────
+function emaCalc(arr, period) {
+  if (!arr.length) return 0;
+  const k = 2/(period+1);
+  return arr.reduce((p,c,i) => i===0 ? c : c*k + p*(1-k));
+}
+
+function rsiCalc(arr, p=14) {
+  if (arr.length < p+1) return 50;
+  let g=0, l=0;
+  for (let i=arr.length-p; i<arr.length; i++) {
+    const d = arr[i]-arr[i-1];
+    if (d>0) g+=d; else l-=d;
+  }
+  return l===0 ? 100 : 100-100/(1+g/l);
+}
+
+function bbCalc(arr, p=20, mult=2) {
+  if (arr.length < p) return {upper:arr[arr.length-1]*1.02, lower:arr[arr.length-1]*0.98, mid:arr[arr.length-1]};
+  const slice=arr.slice(-p), mid=slice.reduce((a,b)=>a+b,0)/p;
+  const sd=Math.sqrt(slice.reduce((s,v)=>s+(v-mid)**2,0)/p);
+  return {upper:mid+mult*sd, lower:mid-mult*sd, mid};
+}
+
 function runNightlyReplay(history, optimizerParams, externalKlines={}) {
-  // Combinar historial en memoria con klines reales descargados
   const combinedHistory={...externalKlines};
   for(const [sym,prices] of Object.entries(history)){
-    if(!combinedHistory[sym]||combinedHistory[sym].length<prices.length){
+    if(!combinedHistory[sym]||combinedHistory[sym].length<prices.length)
       combinedHistory[sym]=prices;
-    }
   }
 
+  // Más variantes de parámetros para explorar más el espacio
   const variants=[
-    {emaFast:7, emaSlow:18,minScore:60},
-    {emaFast:9, emaSlow:21,minScore:65},
-    {emaFast:11,emaSlow:26,minScore:65},
-    {emaFast:9, emaSlow:21,minScore:70},
-    {emaFast:7, emaSlow:14,minScore:62},
-    {emaFast:12,emaSlow:26,minScore:68},
-    // Params actuales también
-    {...optimizerParams},
+    {emaFast:7,  emaSlow:18, minScore:58, rsiOversold:32},
+    {emaFast:9,  emaSlow:21, minScore:62, rsiOversold:30},
+    {emaFast:9,  emaSlow:21, minScore:68, rsiOversold:35},
+    {emaFast:11, emaSlow:26, minScore:63, rsiOversold:32},
+    {emaFast:7,  emaSlow:14, minScore:60, rsiOversold:28},
+    {emaFast:12, emaSlow:26, minScore:66, rsiOversold:33},
+    {emaFast:5,  emaSlow:13, minScore:62, rsiOversold:30},
+    {emaFast:8,  emaSlow:21, minScore:65, rsiOversold:35},
+    {...optimizerParams}, // params actuales
   ];
 
   const results=[];
+  const FEE = 0.00075 * 2; // BNB fee round-trip
+
   for(const params of variants){
-    let wins=0,losses=0,totalPnl=0;
-    for(const[symbol,prices]of Object.entries(combinedHistory)){
-      if(prices.length<50)continue;
-      let inTrade=false,entryPrice=0;
-      for(let i=Math.max(params.emaSlow,21);i<prices.length-1;i++){
-        const slice=prices.slice(0,i+1);
-        const k=2/(params.emaFast+1),k2=2/(params.emaSlow+1);
-        const emaF=slice.slice(-params.emaFast).reduce((p,c,j)=>j===0?c:c*k+p*(1-k));
-        const emaS=slice.slice(-params.emaSlow).reduce((p,c,j)=>j===0?c:c*k2+p*(1-k2));
-        const score=emaF>emaS?70:30;
-        if(!inTrade&&score>=params.minScore){inTrade=true;entryPrice=prices[i];}
-        else if(inTrade&&score<(100-params.minScore)){
-          const pnl=(prices[i]-entryPrice)/entryPrice*100;
-          if(pnl>0)wins++;else losses++;
-          totalPnl+=pnl;inTrade=false;
+    let wins=0, losses=0, totalPnl=0, pnls=[];
+    for(const [symbol,prices] of Object.entries(combinedHistory)){
+      if(prices.length<50) continue;
+      let inTrade=false, entryPrice=0;
+      for(let i=30; i<prices.length-1; i++){
+        const slice = prices.slice(Math.max(0,i-50), i+1);
+        const emaF = emaCalc(slice, params.emaFast||9);
+        const emaS = emaCalc(slice, params.emaSlow||21);
+        const rsiVal = rsiCalc(slice);
+        const bb = bbCalc(slice);
+        const bbPos = (prices[i]-bb.lower)/(bb.upper-bb.lower||1);
+
+        // Entry: EMA cross + RSI oversold + BB low
+        const buyScore = (emaF>emaS?35:0) + (rsiVal<(params.rsiOversold||32)?30:0) + (bbPos<0.25?20:0);
+        const sellScore = (emaF<emaS?35:0) + (rsiVal>68?25:0) + (bbPos>0.75?15:0);
+
+        if(!inTrade && buyScore>=(params.minScore||60)){
+          inTrade=true; entryPrice=prices[i];
+        } else if(inTrade && (sellScore>=55 || prices[i]<entryPrice*0.96)){
+          const pnl = (prices[i]-entryPrice)/entryPrice*100 - FEE*100;
+          if(pnl>0) wins++; else losses++;
+          totalPnl+=pnl; pnls.push(pnl); inTrade=false;
         }
       }
     }
     const total=wins+losses;
-    results.push({params,winRate:total?+(wins/total*100).toFixed(0):0,avgPnl:total?+(totalPnl/total).toFixed(2):0,trades:total});
+    if(total<3){results.push({params,winRate:0,avgPnl:0,trades:0,sharpe:0});continue;}
+    const wr=+(wins/total*100).toFixed(0);
+    const avgPnl=+(totalPnl/total).toFixed(2);
+    // Sharpe ratio simplificado
+    const mean=totalPnl/total;
+    const variance=pnls.reduce((s,p)=>s+(p-mean)**2,0)/total;
+    const sharpe=variance>0?+(mean/Math.sqrt(variance)).toFixed(2):0;
+    results.push({params,winRate:wr,avgPnl,trades:total,sharpe});
   }
 
-  const best=results.sort((a,b)=>(b.winRate*0.6+b.avgPnl*0.4)-(a.winRate*0.6+a.avgPnl*0.4))[0];
-  console.log(`[REPLAY] Mejor: EMA${best.params.emaFast}/${best.params.emaSlow} score${best.params.minScore} | WR:${best.winRate}% avgPnl:${best.avgPnl}% (${best.trades} trades, ${Object.keys(combinedHistory).length} pares)`);
+  // Ordenar por combinación de WR, avgPnl y Sharpe
+  const best=results
+    .filter(r=>r.trades>=5)
+    .sort((a,b)=>(b.winRate*0.4+b.avgPnl*0.4+b.sharpe*0.2)-(a.winRate*0.4+a.avgPnl*0.4+a.sharpe*0.2))[0]
+    || results[0];
+
+  console.log(`[REPLAY] Mejor: EMA${best.params.emaFast}/${best.params.emaSlow} score${best.params.minScore} RSI<${best.params.rsiOversold||32} | WR:${best.winRate}% avgPnl:${best.avgPnl}% Sharpe:${best.sharpe} (${best.trades} trades)`);
   return best;
 }
 

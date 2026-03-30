@@ -242,12 +242,52 @@ function computeSignal(sym,history,params,regime="UNKNOWN"){
 }
 
 // En BEAR: también generar señal scalp para complementar
-function computeSignalWithScalp(sym, history, params, regime) {
+// Analiza tendencia multi-timeframe y devuelve sesgo alcista/bajista
+function getMultiTFBias(tfData) {
+  if (!tfData) return { bias: 0, label: "neutral" };
+  const { tf5=[], tf15=[], tf60=[] } = tfData;
+  let bullPoints = 0, bearPoints = 0;
+  // 5min trend
+  if (tf5.length >= 3) {
+    const t5 = (tf5[tf5.length-1] - tf5[tf5.length-3]) / tf5[tf5.length-3] * 100;
+    if (t5 > 0.3) bullPoints += 2; else if (t5 < -0.3) bearPoints += 2;
+  }
+  // 15min trend
+  if (tf15.length >= 3) {
+    const t15 = (tf15[tf15.length-1] - tf15[tf15.length-3]) / tf15[tf15.length-3] * 100;
+    if (t15 > 0.5) bullPoints += 3; else if (t15 < -0.5) bearPoints += 3;
+  }
+  // 1h trend — más peso
+  if (tf60.length >= 2) {
+    const t60 = (tf60[tf60.length-1] - tf60[tf60.length-2]) / tf60[tf60.length-2] * 100;
+    if (t60 > 0.3) bullPoints += 4; else if (t60 < -0.3) bearPoints += 4;
+  }
+  const bias = bullPoints - bearPoints; // positive = bullish, negative = bearish
+  const label = bias >= 4 ? "strong_bull" : bias >= 2 ? "bull" : bias <= -4 ? "strong_bear" : bias <= -2 ? "bear" : "neutral";
+  return { bias, label, bullPoints, bearPoints };
+}
+
+function computeSignalWithScalp(sym, history, params, regime, tfHistory={}) {
   const main = computeSignal(sym, history, params, regime);
+  
+  // Multi-timeframe bias
+  const mtf = getMultiTFBias(tfHistory[sym]);
+  
+  // If 1h trend is strongly bearish → skip weak BUY signals
+  if (mtf.label === "strong_bear" && main.signal === "BUY" && main.score < 70) {
+    return { ...main, signal: "HOLD", score: main.score - 15, reason: main.reason + " [MTF BEAR block]" };
+  }
+  // If 1h trend is bullish → boost BUY signals slightly
+  if ((mtf.label === "bull" || mtf.label === "strong_bull") && main.signal === "BUY") {
+    return { ...main, score: Math.min(95, main.score + 8), reason: main.reason + " [MTF BULL +" + mtf.bullPoints + "]" };
+  }
+  
   if (regime === "BEAR" || regime === "LATERAL") {
     const scalp = signalScalp(sym, history, params);
-    // Si scalp tiene mejor score que señal principal → usar scalp
-    if (scalp.signal === "BUY" && scalp.score > main.score) return scalp;
+    // Only do scalp if MTF is not strongly bearish
+    if (scalp.signal === "BUY" && scalp.score > main.score && mtf.label !== "strong_bear") {
+      return scalp;
+    }
   }
   return main;
 }
@@ -405,7 +445,7 @@ class CryptoBotFinal {
 
     const signals=PAIRS.map(p=>({
       ...p,price:this.prices[p.symbol]||0,
-      ...computeSignalWithScalp(p.symbol,this.history,params,this.marketRegime),
+      ...computeSignalWithScalp(p.symbol,this.history,params,this.marketRegime,this.tfHistory),
       isPumping:isPumping(this.history[p.symbol]),isFalling:isFallingFast(this.history[p.symbol]),
       pairScore:this.pairScores[p.symbol]?.score||50,
     }));
@@ -470,7 +510,7 @@ class CryptoBotFinal {
         const closeTrend=this.intradayTrend.getTrend(symbol);
         const closeVolRatio=getVolumeAnomaly(this.volumeHistory,symbol).ratio;
         const nextState=this.qLearning.encodeState({rsi:closeRsi,bbZone:closeBBZone,regime:this.marketRegime,trend:closeTrend.direction,volumeRatio:closeVolRatio,atrLevel:closeAtr});
-        this.qLearning.recordTradeOutcome(pos.entryState,pnl/100,nextState);
+        this.qLearning.recordTradeOutcome(pos.entryState,pnl/100,nextState,{reason});
         this.qLearning.decayEpsilon(0.03, 0.9995, totalTrades);
         if(pos.ensembleVotes) this.ensemble.updateWeights(pos.ensembleVotes,win);
         if(Math.random()<0.05) this.patternMemory.updateCorrelations();
@@ -523,12 +563,17 @@ class CryptoBotFinal {
           if(learningPhase===3){const grp=PAIRS.find(p=>p.symbol===s.symbol)?.group;if(grp&&(groupCount[grp]||0)>=3)return false;}
           return true;
         }).sort((a,b)=>{
-          const scoreA = a.score*(this.pairScores[a.symbol]?.score||50)/100;
-          const scoreB = b.score*(this.pairScores[b.symbol]?.score||50)/100;
-          // Bonus por momentum propio
+          const pairScoreA = this.pairScores[a.symbol]?.score||50;
+          const pairScoreB = this.pairScores[b.symbol]?.score||50;
+          // Cross-pair learning: si PatternMemory de pares correlacionados confirma → boost
+          const crossA = this.patternMemory.getCrossLearnedBias(a.symbol, a.rsiVal||50, null, this.prices[a.symbol], this.marketRegime);
+          const crossB = this.patternMemory.getCrossLearnedBias(b.symbol, b.rsiVal||50, null, this.prices[b.symbol], this.marketRegime);
+          const crossBoostA = crossA && crossA.crossLearnedScore > 0.6 ? 1.15 : 1.0;
+          const crossBoostB = crossB && crossB.crossLearnedScore > 0.6 ? 1.15 : 1.0;
+          const scoreA = a.score*(pairScoreA/100)*crossBoostA;
+          const scoreB = b.score*(pairScoreB/100)*crossBoostB;
           const momA = (a.mom10||0) > 1 ? 1.1 : 1.0;
           const momB = (b.mom10||0) > 1 ? 1.1 : 1.0;
-          // Bonus por confirmación de pares correlacionados
           const corrA = this.corrManager.getSizeMultiplier(a.symbol, this.portfolio, this.prices, a.score);
           const corrB = this.corrManager.getSizeMultiplier(b.symbol, this.portfolio, this.prices, b.score);
           return (scoreB*momB*corrB)-(scoreA*momA*corrA);

@@ -330,6 +330,32 @@ broadcast({ type:"tick", data:{ ...bot.getState(), signals, newTrades, circuitBr
 
     // Enviar equity a BAFIR como instancia paper
     if(ticks%60===0) sendEquityToBafirPaper(bot.totalValue());
+    // Intraday replay cada 3h: aprende del día en curso (×100 velocidad)
+    if(ticks%5400===0 && ticks>900 && Object.keys(bot.history).length>5) {
+      const todaySells=(bot.log||[]).filter(l=>l.type==="SELL"&&l.ts&&new Date(l.ts).toDateString()===new Date().toDateString());
+      if(todaySells.length>=5) {
+        const wins=todaySells.filter(l=>l.pnl>0).length;
+        const todayWR=Math.round(wins/todaySells.length*100);
+        const todayAvgPnl=+(todaySells.reduce((s,l)=>s+(l.pnl||0),0)/todaySells.length).toFixed(2);
+        // Si el día va mal (WR<35%), ajustar score mínimo hacia arriba
+        if(todayWR<35 && todaySells.length>=8) {
+          const cur=bot.optimizer.getParams();
+          if(cur.minScore<72){
+            bot.optimizer.params.minScore=Math.min(72,cur.minScore+3);
+            console.log(`[INTRADAY-REPLAY] WR${todayWR}% → minScore subido a ${bot.optimizer.params.minScore}`);
+          }
+        }
+        // Si va bien (WR>60%), relajar un poco para capturar más oportunidades
+        else if(todayWR>60 && todaySells.length>=8) {
+          const cur=bot.optimizer.getParams();
+          if(cur.minScore>50){
+            bot.optimizer.params.minScore=Math.max(50,cur.minScore-2);
+            console.log(`[INTRADAY-REPLAY] WR${todayWR}% → minScore bajado a ${bot.optimizer.params.minScore}`);
+          }
+        }
+        console.log(`[INTRADAY-REPLAY] Hoy: ${todaySells.length} ops WR${todayWR}% avgPnl${todayAvgPnl}%`);
+      }
+    }
     // Re-simulación histórica cada 6h con datos frescos de Binance
     if(ticks%10800===0 && ticks>0) {
       const HIST_SYMBOLS = ["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC","ADAUSDC","XRPUSDC","LINKUSDC","AVAXUSDC"];

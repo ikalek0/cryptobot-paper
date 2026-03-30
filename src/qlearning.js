@@ -48,9 +48,17 @@ class QLearning {
   }
 
   // ── Record outcome of a trade ────────────────────────────────────────────
-  recordTradeOutcome(entryState, pnlPct, nextState) {
-    // Reward: scaled pnl, capped at ±2
-    const reward = Math.max(-2, Math.min(2, pnlPct * 20));
+  recordTradeOutcome(entryState, pnlPct, nextState, tradeMetadata={}) {
+    // Reward multi-componente:
+    // - P&L base (principal)
+    // - Bonus por win (consistencia)
+    // - Bonus si salió por target (no por stop)
+    // - Penalización si salió por stop loss
+    const basePnl = Math.max(-2, Math.min(2, pnlPct * 20));
+    const winBonus = pnlPct > 0 ? 0.3 : 0;
+    const targetBonus = tradeMetadata.reason === "MR OBJETIVO" || tradeMetadata.reason === "SCALP TARGET" ? 0.4 : 0;
+    const stopPenalty = tradeMetadata.reason === "STOP LOSS" ? -0.5 : 0;
+    const reward = basePnl + winBonus + targetBonus + stopPenalty;
     const resolvedNext = nextState || entryState;
     this.update(entryState, this.lastAction || "BUY", reward, resolvedNext);
     this.lastState = null; this.lastAction = null;
