@@ -102,13 +102,7 @@ app.get("/api/confidence", (_,res) => {
   const color=score>=80?"#00c851":score>=65?"#33b5e5":score>=45?"#ffbb33":score>=30?"#ff8800":"#cc0000";
   res.json({score,label,color,winRate:wr,drawdown:+(dd*100).toFixed(2)});
 });
-app.post("/api/reset", async (_,res) => {
-  bot=new CryptoBotFinal(); bot.mode="PAPER";
-  blacklist.restore({});
-  await deleteState();
-  broadcast({type:"state",data:bot.getState()});
-  res.json({ok:true});
-});
+// Reset endpoint eliminado por seguridad — no exponer esta funcionalidad
 
 // Endpoint para que el LIVE consulte el estado del PAPER
 app.get("/api/paper/status", (req,res) => {
