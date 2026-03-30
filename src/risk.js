@@ -38,12 +38,31 @@ class TrailingStop {
   remove(symbol){delete this.highs[symbol];}
 }
 
-function calcPositionSize(availableCash,score,atrPct,profile,nOpen){
-  const base=availableCash*profile.maxPositionSize;
-  const scoreFactor=0.6+((score-50)/50)*0.8;
-  const atrFactor=atrPct>5?0.5:atrPct>3?0.75:1.0;
-  const openFactor=Math.max(0.4,1-nOpen*0.15);
-  return Math.min(base,availableCash*0.5)*scoreFactor*atrFactor*openFactor;
+function calcKellyFraction(winRate, avgWinPct, avgLossPct) {
+  // Kelly Criterion: f* = WR/|avgLoss| - (1-WR)/avgWin
+  // Acotado entre 0 y maxPositionSize para seguridad
+  if(!winRate||!avgWinPct||!avgLossPct||avgLossPct===0) return 0.20; // default conservador
+  const wr = Math.min(0.80, Math.max(0.10, winRate));
+  const ratio = Math.abs(avgWinPct) / Math.abs(avgLossPct);
+  const kelly = wr - (1-wr)/ratio;
+  // Half-Kelly para ser conservadores (estrategia estándar en fondos)
+  const halfKelly = kelly * 0.5;
+  return Math.max(0.05, Math.min(0.40, halfKelly)); // entre 5% y 40%
+}
+
+function calcPositionSize(availableCash, score, atrPct, profile, nOpen, kellyData=null) {
+  // Base: Kelly Criterion si tenemos suficientes datos, sino usar max% fijo
+  let base;
+  if(kellyData && kellyData.trades>=20) {
+    const kellyFrac = calcKellyFraction(kellyData.winRate/100, kellyData.avgWin, kellyData.avgLoss);
+    base = availableCash * kellyFrac;
+  } else {
+    base = availableCash * profile.maxPositionSize;
+  }
+  const scoreFactor = 0.6 + ((score-50)/50)*0.8;
+  const atrFactor   = atrPct>5 ? 0.5 : atrPct>3 ? 0.75 : 1.0;
+  const openFactor  = Math.max(0.4, 1 - nOpen*0.15);
+  return Math.min(base, availableCash*0.50) * scoreFactor * atrFactor * openFactor;
 }
 
 class AutoOptimizer {

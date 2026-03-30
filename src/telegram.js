@@ -107,8 +107,17 @@ function startCommandListener(getState, botControls={}) {
 
   function buildLearning(state) {
     const t=(state.log||[]).filter(l=>l.type==="SELL").length;
-    const ph=t<100?"Fase 1 (exploración)":t<500?"Fase 2 (refinamiento)":"Fase 3 (optimizado)";
-    return "🧠 <b>Aprendizaje</b>\n"+ph+"\nTrades: "+t+"\nWR: "+(state.winRate||0)+"%\nRégimen: "+(state.marketRegime||"—");
+    const ph=t<100?"🌱 Fase 1 (exploración)":t<500?"🔧 Fase 2 (refinamiento)":"🎯 Fase 3 (optimizado)";
+    const ql=state.qLearningStats||{};
+    const dqn=state.dqnStats||{};
+    const qStates=ql.states||0;
+    const eps=ql.epsilon!=null?(ql.epsilon*100).toFixed(1)+"%":"?";
+    const replay=ql.replayBuffer||0;
+    const wf=state.walkForwardResult;
+    const wfLine=wf?"\nWF: Train "+wf.trainWR+"% -> Test "+wf.testWR+"% (ratio "+wf.overfit+")":"";
+    const streak=state.streakMult!=null?"\nStreak: x"+state.streakMult.toFixed(2):"";
+    const dqnInfo=dqn.totalUpdates>0?"\nDQN: "+dqn.totalUpdates+" updates | loss:"+dqn.avgLoss.toFixed(5)+" | buf:"+dqn.replaySize:"\nDQN: aun pre-entrenando";
+    return "[PAPER] Aprendizaje\n"+ph+"\n\nTrades: "+t+" | WR: "+(state.winRate||0)+"%\nRegimen: "+(state.marketRegime||"?")+" | F&G: "+(state.fearGreed||"?")+"\n\nQ-Table: "+qStates+" estados | Exploracion: "+eps+"\nBuffer: "+replay+dqnInfo+wfLine+streak;
   }
 
   function buildRisk(state) {
@@ -136,7 +145,13 @@ function startCommandListener(getState, botControls={}) {
             else if(text==="/posiciones") send(buildPositions(state));
             else if(text==="/log")     send(buildLog10(state));
             else if(text==="/momentum")send(buildMomentum(state));
-            else if(text==="/aprendizaje")send(buildLearning(state));
+            else if(text==="/aprendizaje"){
+              const ma=state.multiAgentStats||{};
+              const agents=ma.agents||{};
+              const maLines=Object.entries(agents).filter(([,a])=>a.trades>0)
+                .map(([r,a])=>r+": WR "+a.winRate+"% ("+a.trades+" trades, eps "+a.dqn?.epsilon+")").join("\n");
+              send(buildLearning(state)+(maLines?"\n\nAgentes especializados:\n"+maLines:""));
+            }
             else if(text==="/riesgo")  send(buildRisk(state));
             else if(text==="/pausa"){
               paused=true;
@@ -161,6 +176,39 @@ function startCommandListener(getState, botControls={}) {
                 if(!bal||!bal.length){send("❌ Sin conexión Binance real");return;}
                 send("💰 <b>Balance</b>\n"+bal.filter(b=>parseFloat(b.free)>0.001).map(b=>b.asset+": "+parseFloat(b.free).toFixed(4)).join("\n"));
               }).catch(()=>send("❌ Error balance"));
+            }
+                        else if(text==="/estrategias"){
+              const se=state.stratEvalStats||{weights:{},performance:{},adaptations:[]};
+              const w=se.weights||{};
+              const lines=Object.entries(w).map(([s,v])=>s+": x"+v).join("\n");
+              const last=se.adaptations?.slice(-2).map(a=>a.changes?.join(", ")||"").join("\n")||"Sin adaptaciones aun";
+              send("[PAPER] Meta-learning estrategias\n\nPesos actuales:\n"+lines+"\n\nUltimas adaptaciones:\n"+last);
+            }
+            else if(text==="/mercado"){
+              const ls=state.longShortRatio||{ratio:"?",signal:"?"};
+              const fr=state.fundingRate||{rate:"?",signal:"?"};
+              const rs=state.redditSentiment||{score:50,signal:"?",postCount:0};
+              const fgE=state.fearGreed<20?"PANICO":state.fearGreed<40?"MIEDO":state.fearGreed>75?"CODICIA":"NEUTRAL";
+              const msg="[PAPER] Estado del mercado\n\n"+
+                "Regimen: "+(state.marketRegime||"?")+"\n"+
+                "Fear&Greed: "+(state.fearGreed||"?")+" "+fgE+" ("+(state.fearGreedSource||"?")+")"+"\n"+
+                "Reddit sentiment: "+rs.score+"/100 "+rs.signal+" ("+rs.postCount+" posts)"+"\n\n"+
+                "Long/Short: "+ls.ratio+" -> "+ls.signal+"\n"+
+                "Funding BTC: "+fr.rate+"% -> "+fr.signal+"\n\n"+
+                "Defensivo: "+(state.marketDefensive?"SI":"NO");
+              send(msg);
+            }
+            else if(text==="/top"){
+              const ps=state.pairScores||{};
+              const pairs=Object.entries(ps)
+                .map(([s,p])=>({s:s.replace("USDC",""),wins:p.wins||0,losses:p.losses||0,pnl:+(p.totalPnl||0).toFixed(1),wr:p.wins+p.losses>0?Math.round(p.wins/(p.wins+p.losses)*100):0}))
+                .filter(p=>p.wins+p.losses>=2)
+                .sort((a,b)=>b.pnl-a.pnl);
+              if(!pairs.length){send("No hay datos suficientes por par aun");return;}
+              const fmt=(p)=>(p.wr>=50?"G ":"X ")+""+p.s+": WR "+p.wr+"% P&L "+(p.pnl>0?"+":"")+p.pnl+"%";
+              const top=pairs.slice(0,5).map(fmt).join("\n");
+              const worst=pairs.slice(-3).reverse().map(fmt).join("\n");
+              send("PAPER Ranking de pares\n\nMejores:\n"+top+"\n\nPeores:\n"+worst);
             }
             else if(text==="/walkforward"){
               const wf = state.walkForwardResult;

@@ -3,6 +3,9 @@
 
 const { RISK_PROFILES, CircuitBreaker, TrailingStop, calcPositionSize, AutoOptimizer } = require("./risk");
 const { PatternMemory }    = require("./patternMemory");
+const { DQN }             = require("./dqn");
+const { MultiAgentSystem }   = require("./multiAgent");
+const { StrategyEvaluator } = require("./strategyEvaluator");
 const { RiskLearning }     = require("./riskLearning");
 const { CorrelationManager } = require("./correlationManager");
 const { QLearning, EnsembleVoter } = require("./qlearning");
@@ -353,6 +356,9 @@ class CryptoBotFinal {
     this.optimizer=new AutoOptimizer();
     // ── Módulos de aprendizaje v3 ──────────────────────────────────────────
     this.patternMemory  = new PatternMemory();
+    this.dqn            = new DQN({ lr:0.001, gamma:0.95, epsilon:0.15 });
+    this.multiAgent     = new MultiAgentSystem();
+    this.stratEval      = new StrategyEvaluator(); // meta-learning de estrategias // agentes especializados por régimen
     this.cfMemory       = new CounterfactualMemory();
     this.qLearning      = new QLearning({ alpha:0.2, gamma:0.85, epsilon:0.25 }); // Aprendizaje más rápido en paper
     this.ensemble       = new EnsembleVoter();
@@ -378,6 +384,9 @@ class CryptoBotFinal {
         this.patternMemory.loadJSON(saved.learningData.patternMemory);
         this.cfMemory.loadJSON(saved.learningData.cfMemory);
         this.qLearning.loadJSON(saved.learningData.qLearning);
+        if(saved.learningData.dqn) this.dqn.loadJSON(saved.learningData.dqn);
+        if(saved.learningData.multiAgent) this.multiAgent.loadJSON(saved.learningData.multiAgent);
+        if(saved.learningData.stratEval) this.stratEval.loadJSON(saved.learningData.stratEval);
         this.ensemble.loadJSON(saved.learningData.ensemble);
       }
       console.log(`[ENGINE v3] Restaurado tick #${this.tick} | $${this.totalValue().toFixed(2)}`);
@@ -429,6 +438,8 @@ class CryptoBotFinal {
 
     const wr=this.recentWinRate(),dailyLimit=getDailyLimit(this.marketRegime,wr);
     const totalTrades=this.log.filter(l=>l.type==="SELL").length;
+    // Meta-learning: evaluar qué estrategias funcionan ahora
+    const metaResult = this.stratEval.evaluate(this.marketRegime);
     const learningPhase=totalTrades<100?1:totalTrades<500?2:3;
     if(this.tick===1||this.tick%1800===0) console.log(`[PAPER][FASE ${learningPhase}] Trades: ${totalTrades} | Régimen: ${this.marketRegime} | WR: ${wr||"—"}%`);
 
@@ -443,9 +454,14 @@ class CryptoBotFinal {
     const dailyLimitReached=this.dailyTrades.count>=paperDailyLimit;
     const params=this.optimizer.getParams();
 
+    // Aplicar pesos de meta-learning a los scores de cada estrategia
     const signals=PAIRS.map(p=>({
       ...p,price:this.prices[p.symbol]||0,
-      ...computeSignalWithScalp(p.symbol,this.history,params,this.marketRegime,this.tfHistory),
+      ...(()=>{
+        const sig=computeSignalWithScalp(p.symbol,this.history,params,this.marketRegime,this.tfHistory);
+        const sw=this.stratEval?.getWeight(sig.strategy)||1.0;
+        return {...sig, score:Math.min(95,Math.round(sig.score*sw))};
+      })(),
       isPumping:isPumping(this.history[p.symbol]),isFalling:isFallingFast(this.history[p.symbol]),
       pairScore:this.pairScores[p.symbol]?.score||50,
     }));
@@ -480,8 +496,41 @@ class CryptoBotFinal {
       // Scalp: salir rápido cuando hay beneficio
       const isScalp = pos.strategy === "SCALP";
       const scalpExit = isScalp && cp >= pos.entryPrice * 1.004; // +0.4% → salir
-      const mrTarget = this.marketRegime==="LATERAL" ? 0.65 : 0.85;
-      const mrExit = !isScalp && sig?.bbPos>mrTarget && sig?.rsiVal>58;
+
+      // Partial exit: cerrar 50% en +1.5% si no hay stop ni target aún
+      if (!isScalp && !pos.partialDone && cp >= pos.entryPrice * 1.015) {
+        const partialQty = pos.qty * 0.5;
+        const proceeds = partialQty * cp * (1 - fee);
+        this.cash += proceeds;
+        this.portfolio[symbol].qty -= partialQty;
+        this.portfolio[symbol].partialDone = true;
+        // Subir stop al break-even una vez tomado beneficio parcial
+        this.portfolio[symbol].stopLoss = Math.max(pos.stopLoss, pos.entryPrice * 1.001);
+        const pnlPart = (cp - pos.entryPrice) / pos.entryPrice * 100 - fee * 200;
+        const partialTrade = {type:"SELL",symbol,name:pos.name,qty:+partialQty.toFixed(6),price:+cp.toFixed(4),pnl:+pnlPart.toFixed(2),reason:"PARTIAL EXIT",mode:this.mode,fee:+(partialQty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"ENSEMBLE"};
+        newTrades.push(partialTrade);
+        console.log(`[PAPER][PARTIAL] ${symbol} +${pnlPart.toFixed(2)}% → 50% vendido, stop→BE`);
+      }
+      // Exit targets adaptativos por régimen - trend riding en BULL
+      const mrTarget = this.marketRegime==="BULL"    ? 0.92 :   // BULL: dejar correr
+                       this.marketRegime==="LATERAL" ? 0.65 :   // LATERAL: salir rápido
+                       0.82;                                     // BEAR: target normal
+      const mrRsi    = this.marketRegime==="BULL" ? 72 : 58;
+      const mrExit   = !isScalp && sig?.bbPos>mrTarget && sig?.rsiVal>mrRsi;
+      // Trend riding: en BULL con beneficio asegurado → ampliar trailing a 4%
+      // También si este par lleva racha ganadora en el mismo régimen
+      const pairWins = (this._pairStreak||{})[symbol]?.wins||0;
+      const regimeContinues = pos.regime === this.marketRegime;
+      const trendRide = (this.marketRegime==="BULL" || (pairWins>=2 && regimeContinues)) && !isScalp && (pos.profitLocked||0)>0.3;
+      if(trendRide) {
+        // Trailing escala con win streak: 2→4%, 4→5%, 6+→6%
+        const trailPct = pairWins>=6 ? 0.94 : pairWins>=4 ? 0.95 : 0.96;
+        const bullTrail = cp * trailPct;
+        if(bullTrail > (this.portfolio[symbol]?.trailingStop||0)) {
+          this.portfolio[symbol].trailingStop = +bullTrail.toFixed(4);
+          if(pairWins>=4) console.log(`[TREND-RIDE] ${symbol} streak=${pairWins} trailing=${((1-trailPct)*100).toFixed(0)}%`);
+        }
+      }
       const bearSell=this.marketRegime==="BEAR"&&pos.profitLocked<0&&ts.profitLocked<0;
       // En paper: no salir solo por señal SELL débil — esperar stop o trailing con beneficio real
       const signalExit=sig?.signal==="SELL"&&sig?.score<=(100-params.minScore-10)&&ts.profitLocked>0.5;
@@ -509,9 +558,64 @@ class CryptoBotFinal {
         const closeAtr=atr(closeH)/(cp*0.01);
         const closeTrend=this.intradayTrend.getTrend(symbol);
         const closeVolRatio=getVolumeAnomaly(this.volumeHistory,symbol).ratio;
-        const nextState=this.qLearning.encodeState({rsi:closeRsi,bbZone:closeBBZone,regime:this.marketRegime,trend:closeTrend.direction,volumeRatio:closeVolRatio,atrLevel:closeAtr});
+        const nextState=this.qLearning.encodeState({rsi:closeRsi,bbZone:closeBBZone,regime:this.marketRegime,trend:closeTrend.direction,volumeRatio:closeVolRatio,atrLevel:closeAtr,fearGreed:this.fearGreed});
         this.qLearning.recordTradeOutcome(pos.entryState,pnl/100,nextState,{reason});
+        // DQN: guardar experiencia y entrenar
+        if(pos.dqnState) {
+          const dqnReward = Math.max(-2, Math.min(2, pnl/100*15))
+            + (win?0.3:0) + (reason==="SCALP TARGET"||reason==="MR OBJETIVO"?0.4:0)
+            + (reason==="STOP LOSS"?-0.5:0);
+          const closeVec = this.dqn.encodeState({rsi:closeRsi,bbZone:closeBBZone,regime:this.marketRegime,
+            trend:closeTrend.direction,volumeRatio:closeVolRatio,atrLevel:closeAtr,
+            fearGreed:this.fearGreed,lsRatio:this.longShortRatio?.ratio||1});
+          this.dqn.remember(pos.dqnState, pos.dqnAction||"BUY", dqnReward, closeVec, false);
+          // Multi-agent: el agente del régimen de entrada aprende
+          if(pos.dqnState) {
+            const maLoss = this.multiAgent.learnFromTrade(
+              pos.regime||this.marketRegime, pos.dqnState,
+              pos.dqnAction||"BUY", dqnReward, closeVec, pnl
+            );
+          }
+          // Train DQN general every 50 trades
+          if(totalTrades>0 && totalTrades%50===0 && this.dqn.replayBuffer.length>=50) {
+            const loss=this.dqn.trainBatch();
+            if(totalTrades%200===0) console.log(`[DQN] Updates:${this.dqn.totalUpdates} Loss:${loss.toFixed(4)} | MA: BULL-WR:${this.multiAgent.agents.BULL?.winRate}% BEAR-WR:${this.multiAgent.agents.BEAR?.winRate}%`);
+          }
+          this.dqn.decayEpsilon(0.03, totalTrades);
+          this.multiAgent.decayEpsilon(totalTrades);
+        }
+
+        // DQN: record experience and train
+        if(pos.dqnState) {
+          const nextDqnState = this.dqn.encodeState({
+            rsi:closeRsi, bbZone:closeBBZone, regime:this.marketRegime,
+            trend:closeTrend.direction, volumeRatio:closeVolRatio,
+            atrLevel:closeAtr, fearGreed:this.fearGreed,
+            lsRatio:this.longShortRatio?.ratio||1
+          });
+          // Reward: same as Q-Learning but continuous
+          const dqnReward = Math.max(-2, Math.min(2, pnl/100*20))
+            + (win ? 0.3 : 0)
+            + (reason==="SCALP TARGET"||reason==="MR OBJETIVO" ? 0.4 : 0)
+            + (reason==="STOP LOSS" ? -0.5 : 0);
+          this.dqn.remember(pos.dqnState, "BUY", dqnReward, nextDqnState, false);
+
+          // Train every 50 trades
+          if(totalTrades > 0 && totalTrades % 50 === 0 && this.dqn.replayBuffer.length >= 50) {
+            const loss = this.dqn.trainBatch();
+            if(totalTrades % 200 === 0) console.log(`[DQN] Train loss: ${loss.toFixed(6)} | Updates: ${this.dqn.totalUpdates} | Epsilon: ${this.dqn.epsilon.toFixed(3)}`);
+          }
+        }
+        // Añadir al replay buffer para aprendizaje futuro
+        const replayReward = Math.max(-2, Math.min(2, pnl/100*20)) + (win?0.3:0) + (reason==="SCALP TARGET"||reason==="MR OBJETIVO"?0.4:0) + (reason==="STOP LOSS"?-0.5:0);
+        this.qLearning.addToReplayBuffer(pos.entryState||nextState, "BUY", replayReward, nextState);
+        // Experience replay cada 50 trades
+        if(totalTrades>0 && totalTrades%50===0) {
+          const replayed=this.qLearning.experienceReplay(20);
+          if(replayed>0) console.log(`[Q-LEARNING] Experience replay: ${replayed} experiencias re-aprendidas`);
+        }
         this.qLearning.decayEpsilon(0.03, 0.9995, totalTrades);
+        this.dqn.decayEpsilon(0.03, totalTrades);
         if(pos.ensembleVotes) this.ensemble.updateWeights(pos.ensembleVotes,win);
         if(Math.random()<0.05) this.patternMemory.updateCorrelations();
         delete this.portfolio[symbol];this.trailing.remove(symbol);
@@ -519,17 +623,28 @@ class CryptoBotFinal {
           this.reentryTs[symbol]=Date.now();
           // Circuit breaker inteligente: 5 pérdidas seguidas → pausa 30min
           this._consecutiveLosses=(this._consecutiveLosses||0)+1;
+          this._streakMult = Math.max(0.5, 1.0 - this._consecutiveLosses * 0.08);
+          if(!this._pairStreak) this._pairStreak={};
+          this._pairStreak[symbol]=(this._pairStreak[symbol]||{wins:0,losses:0});
+          this._pairStreak[symbol].losses++;
+          this._pairStreak[symbol].wins=0; // reset win streak on loss // reduce size on losing streak
           if(this._consecutiveLosses>=5&&!this._smartPause){
             this._smartPause=Date.now()+30*60*1000;
             console.log(`[PAPER][SMART-CB] 5 pérdidas seguidas → pausa 30min`);
           }
         } else {
           this._consecutiveLosses=0;
+          this._streakMult = Math.min(1.3, (this._streakMult||1.0) + 0.05);
+          if(!this._pairStreak) this._pairStreak={};
+          if(!this._pairStreak[symbol]) this._pairStreak[symbol]={wins:0,losses:0};
+          this._pairStreak[symbol].wins++;
+          this._pairStreak[symbol].losses=0; // boost on winning streak
         }
         if(this._smartPause&&Date.now()>this._smartPause) this._smartPause=null;
         const trade={type:"SELL",symbol,name:pos.name,qty:+pos.qty.toFixed(6),price:+cp.toFixed(4),pnl:+pnl.toFixed(2),reason,mode:this.mode,fee:+(pos.qty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"MOMENTUM"};
         newTrades.push(trade);this.dailyTrades.count++;
         this.optimizer.recordTrade(pnl,reason);updatePairScore(this.pairScores,symbol,pnl);
+        this.stratEval.recordTrade(pos.strategy, this.marketRegime, pnl);
         console.log(`[${this.mode}][${this.marketRegime}][SELL] ${symbol} ${reason} P&L:${pnl.toFixed(2)}% | ${this.dailyTrades.count}/${paperDailyLimit}`);
       }
     }
@@ -559,8 +674,25 @@ class CryptoBotFinal {
           // Cooldown corto en fase 1, normal en fase 3
           const cooldown = learningPhase===1 ? 60*1000 : learningPhase===2 ? 10*60*1000 : 30*60*1000; // paper: cooldown mínimo para aprender más
           const ll=this.reentryTs[s.symbol];if(ll&&Date.now()-ll<cooldown)return false;
+          // Correlation buckets: límite adaptativo según régimen
+          // BULL confirmado: permite hasta 2 del mismo grupo (la correlación trabaja a favor)
+          // LATERAL/BEAR: máx 1 por grupo (evita perder doble en reversión)
+          const CORR_BUCKETS = {
+            major: ["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC"],
+            l2:    ["OPUSDC","ARBUSDC","POLUSDC"],
+            defi:  ["UNIUSDC","AAVEUSDC","LINKUSDC"],
+          };
+          const maxPerBucket = this.marketRegime==="BULL" ? 2 : 1;
+          let corrBlocked = false;
+          for(const [, syms] of Object.entries(CORR_BUCKETS)) {
+            if(syms.includes(s.symbol)) {
+              const openInBucket = Object.keys(this.portfolio).filter(p=>syms.includes(p)).length;
+              if(openInBucket >= maxPerBucket && learningPhase >= 2) { corrBlocked=true; break; }
+            }
+          }
+          if(corrBlocked) return false;
           // Límite por grupo solo en fase 3
-          if(learningPhase===3){const grp=PAIRS.find(p=>p.symbol===s.symbol)?.group;if(grp&&(groupCount[grp]||0)>=3)return false;}
+          if(learningPhase===3){const grp=PAIRS.find(p=>p.symbol===s.symbol)?.group;if(grp&&(groupCount[grp]||0)>=2)return false;}
           return true;
         }).sort((a,b)=>{
           const pairScoreA = this.pairScores[a.symbol]?.score||50;
@@ -591,8 +723,27 @@ class CryptoBotFinal {
           const trendData=this.intradayTrend.getTrend(sig.symbol);
 
           const volData=getVolumeAnomaly(this.volumeHistory,sig.symbol);
-          const stateKey=this.qLearning.encodeState({rsi:rsiVal,bbZone,regime:this.marketRegime,trend:trendData.direction,volumeRatio:volData.ratio,atrLevel});
+          const stateKey=this.qLearning.encodeState({rsi:rsiVal,bbZone,regime:this.marketRegime,trend:trendData.direction,volumeRatio:volData.ratio,atrLevel,fearGreed:this.fearGreed});
           const qAction=this.qLearning.chooseAction(stateKey);
+          // DQN action: más inteligente que tabla Q, activo desde fase 2
+          let dqnAction = qAction; // fallback to Q-table
+          if(totalTrades >= 50) {
+            const dqnState = this.dqn.encodeState({
+              rsi:rsiVal, bbZone, regime:this.marketRegime,
+              trend:trendData.direction, volumeRatio:volData.ratio,
+              atrLevel, fearGreed:this.fearGreed,
+              lsRatio:this.longShortRatio?.ratio||1
+            });
+            dqnAction = this.dqn.chooseAction(dqnState);
+            // Store state for later training
+            sig._dqnState = dqnState;
+          }
+          // Consensus: si Q-table y DQN coinciden → más confianza
+          const dqnConsensus = dqnAction === qAction;
+          // Triple consensus boost: todos de acuerdo en BUY → mayor confianza
+          const dqnBoost = allAgree ? 1.25 : dqnConsensus && dqnAction==="BUY" ? 1.1 : 1.0;
+          // Triple veto: todos de acuerdo en SKIP → no entrar
+          if(anyVeto && learningPhase>=2) continue;
           const ensResult=this.ensemble.vote({rsi:rsiVal,bb,bbZone,price,regime:this.marketRegime,ema20,ema50,volumeRatio:volData.ratio,trend:trendData.direction,atr:atrVal});
 
           // Fase 1: sin filtro ensemble/Q — opera todo para aprender
@@ -603,6 +754,11 @@ class CryptoBotFinal {
           if(learningPhase===1 && sig.score<25) continue;
           // Fase 2: solo bloquear si ensemble muy negativo
           if(learningPhase===2 && ensResult.buyRatio<0.15 && qAction==="SKIP") continue;
+          // DQN veto en fase 3: si DQN dice SKIP con alta confianza → no entrar
+          if(learningPhase===3 && totalTrades>=200) {
+            const dqnQ = sig._dqnState ? this.dqn.getQValues(sig._dqnState) : null;
+            if(dqnQ && dqnQ.SKIP > dqnQ.BUY + 0.5) continue; // DQN muy convencido de SKIP
+          }
           // Fase 3: consenso mínimo (más permisivo que antes para seguir aprendiendo)
           if(learningPhase===3 && ensResult.buyRatio<0.25 && qAction==="SKIP") continue;
           // PatternMemory: boost score si patrón conocido es favorable, bloquear si negativo
@@ -613,13 +769,100 @@ class CryptoBotFinal {
           // Extra: no entrar si BTC cayó >2% en las últimas 5 velas (contagio bearish)
           const btcH=this.history["BTCUSDC"]||[];
           const btcMom5=btcH.length>5?((btcH[btcH.length-1]-btcH[btcH.length-6])/btcH[btcH.length-6]*100):0;
-          // BTC guard solo en caídas severas (-4%) para no bloquear rebotes normales
+          // BTC guard solo en caídas severas (-4%)
           if(btcMom5<-4 && sig.symbol!=="BTCUSDC" && this.marketRegime==="LATERAL") continue;
+
+          // Pump & Dump detection: movimiento >5% en 30 velas = posible manipulación
+          const pumpH = this.history[sig.symbol]||[];
+          if(pumpH.length>=30) {
+            const pump30 = ((pumpH[pumpH.length-1]-pumpH[pumpH.length-30])/pumpH[pumpH.length-30]*100);
+            if(pump30 > 5) {
+              // Precio subió >5% rápidamente → el "dip" puede seguir bajando (dump phase)
+              console.log(`[P&D] ${sig.symbol} subió ${pump30.toFixed(1)}% en 30 velas → bloqueado`);
+              this.reentryTs[sig.symbol] = Date.now() + 2*60*60*1000; // 2h cooldown
+              continue;
+            }
+          }
+
+          // Order book pressure + spoofing detection
+          const obBTC = (global.obPressure||{})["BTCUSDC"]||{};
+          const obSym = (global.obPressure||{})[sig.symbol]||{};
+          // Si se detectó spoofing en los últimos 5min → no entrar (señal falsa)
+          const spoofingRecent = obSym.spoofingDetected &&
+            (Date.now() - (obSym.spoofingTs||0)) < 5*60*1000;
+          if(spoofingRecent) continue;
+          if(obBTC.pressure==="SELL" && obBTC.ratio<0.4 && sig.strategy!=="SCALP") {
+            sig.score = Math.round(sig.score * 0.7);
+          }
+          const obBoost = obSym.pressure==="BUY" && obSym.ratio>2.0 ? 1.2 : 1.0;
+
+          // On-chain: Open Interest + Taker Volume
+          const oi = this.openInterest||{trend:"STABLE",change:0};
+          const tv = this.takerVolume||{signal:"NEUTRAL",ratio:1};
+          // OI creciendo + compradores dominando = señal fuerte de continuación
+          const onChainBoost = (oi.trend==="GROWING" && tv.signal==="BUYERS_DOMINANT") ? 1.2 :
+                               (oi.trend==="DECLINING" && tv.signal==="SELLERS_DOMINANT") ? 0.6 :
+                               tv.signal==="BUYERS_DOMINANT" ? 1.1 :
+                               tv.signal==="SELLERS_DOMINANT" ? 0.8 : 1.0;
+          // OI creciendo + precio cayendo = short squeeze inminente → boost MR
+          const shortSqueezeBoost = (oi.trend==="GROWING" && this.marketRegime==="BEAR" && sig.strategy==="MEAN_REVERSION") ? 1.25 : 1.0;
+
+          // Reddit sentiment: refuerza o debilita señal
+          const reddit = this.redditSentiment||{signal:"NEUTRAL",score:50};
+          const redditMult = reddit.signal==="BULLISH" && sig.strategy!=="SCALP" ? 1.1 :
+                             reddit.signal==="BEARISH" ? 0.85 : 1.0;
+          // También considerar menciones específicas del par
+          const coin = sig.symbol.replace("USDC","");
+          const coinMentions = reddit.mentions?.[coin]||0;
+          const mentionBoost = coinMentions>=3 && reddit.signal==="BULLISH" ? 1.1 : 1.0;
+
+          // Long/Short ratio: si mercado muy apalancado long → peligro de liquidación masiva
+          const lsRatio = this.longShortRatio||{signal:"NEUTRAL"};
+          const fundRate = this.fundingRate||{signal:"NEUTRAL"};
+          // Muchos longs + funding positivo alto = mercado sobrecomprado → reducir exposición MR
+          const lsGuard = lsRatio.signal==="OVERLEVERAGED_LONG" && fundRate.signal==="LONGS_PAYING"
+            ? 0.6  // riesgo de flush de longs
+            : lsRatio.signal==="OVERLEVERAGED_SHORT" && fundRate.signal==="SHORTS_PAYING"
+            ? 1.3  // potential short squeeze = buena oportunidad MR
+            : 1.0;
+
+          // Multi-timeframe: si tenemos datos 1h, confirmar que no están en tendencia opuesta
+          const tf60 = (global.tfHistory||{})[sig.symbol]?.tf60||[];
+          if(tf60.length>=5 && sig.strategy==="MEAN_REVERSION") {
+            const tf60Trend = ((tf60[tf60.length-1]-tf60[tf60.length-5])/tf60[tf60.length-5]*100);
+            // En MR: si 1h muestra caída >3% → probable que el dip siga → reducir score
+            if(tf60Trend < -3) { sig.score = Math.round(sig.score * 0.75); }
+            // Si 1h muestra subida → MR tiene más chance de funcionar → boost
+            if(tf60Trend > 2 && this.marketRegime==="LATERAL") { sig.score = Math.min(95, Math.round(sig.score * 1.15)); }
+          }
 
           const volAnom = getVolumeAnomaly(this.volumeHistory, sig.symbol);
           const volBoost = volAnom.anomaly && sig.score > 55 ? 1.3 : 1.0;
+          // Volatility gate: ATR muy alto = mercado caótico → reducir exposición
+          const h2=this.history[sig.symbol]||[];
+          const curAtrPct=h2.length>14?atr(h2,14)/(h2[h2.length-1]||1)*100:2;
+          const volGate = curAtrPct > 5 ? 0.5 :   // extremamente volátil → mitad
+                          curAtrPct > 3 ? 0.75 :   // muy volátil → reducir
+                          curAtrPct < 0.5 ? 1.1 :  // muy calmado → ligero boost
+                          1.0;
           const corrMult = this.corrManager.getSizeMultiplier(sig.symbol, this.portfolio, this.prices, sig.score);
-          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*corrMult*volBoost*pmBoost;
+          const streakMult = this._streakMult||1.0;
+          // Confidence: cuántas veces hemos visto este estado y qué resultado dio
+          const stateVisits = (this.qLearning._stateVisits||{})[stateKey]||0;
+          const stateQ = this.qLearning.Q[stateKey]||{BUY:0,HOLD:0,SKIP:0};
+          const qConfidence = stateVisits < 5 ? 0.6 :     // estado nuevo → precaución
+                              stateVisits > 50 && stateQ.BUY > stateQ.SKIP ? 1.2 : // conocido bueno
+                              stateVisits > 20 && stateQ.BUY < stateQ.SKIP ? 0.7 : // conocido malo
+                              1.0;
+          // Kelly data from recent trades
+          const recentSells = this.log.filter(l=>l.type==="SELL"&&l.pnl!=null).slice(-50);
+          const kellyData = recentSells.length>=10 ? {
+            trades:recentSells.length,
+            winRate:Math.round(recentSells.filter(l=>l.pnl>0).length/recentSells.length*100),
+            avgWin:recentSells.filter(l=>l.pnl>0).reduce((s,l)=>s+l.pnl,0)/(recentSells.filter(l=>l.pnl>0).length||1),
+            avgLoss:Math.abs(recentSells.filter(l=>l.pnl<0).reduce((s,l)=>s+l.pnl,0)/(recentSells.filter(l=>l.pnl<0).length||1)),
+          } : null;
+          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen,kellyData)*this.hourMultiplier*fearAdj*corrMult*volBoost*pmBoost*streakMult*qConfidence*volGate*obBoost*lsGuard*redditMult*mentionBoost*dqnBoost*onChainBoost*shortSqueezeBoost;
           if(invest<10||invest>availCash)continue;
           const qty=invest*(1-fee)/price,atrV=atr(h,14);
           const isScalpEntry = sig.strategy === "SCALP";
@@ -633,7 +876,7 @@ class CryptoBotFinal {
             stopLoss = dynStop.stop;
           }
           this.cash-=invest;
-          this.portfolio[sig.symbol]={qty,entryPrice:price,stopLoss:+stopLoss.toFixed(4),trailingStop:+stopLoss.toFixed(4),trailingHigh:+price.toFixed(4),profitLocked:0,name:sig.name,ts:new Date().toISOString(),strategy:sig.strategy||"ENSEMBLE",rsiEntry:rsiVal,bbEntry:bb,regime:this.marketRegime,entryState:stateKey,ensembleVotes:ensResult.votes};
+          this.portfolio[sig.symbol]={qty,entryPrice:price,stopLoss:+stopLoss.toFixed(4),trailingStop:+stopLoss.toFixed(4),trailingHigh:+price.toFixed(4),profitLocked:0,name:sig.name,ts:new Date().toISOString(),strategy:sig.strategy||"ENSEMBLE",rsiEntry:rsiVal,bbEntry:bb,regime:this.marketRegime,entryState:stateKey,dqnState:sig._dqnState||null,dqnAction:dqnAction||"BUY",ensembleVotes:ensResult.votes};
           const trade={type:"BUY",symbol:sig.symbol,name:sig.name,qty:+qty.toFixed(6),price:+price.toFixed(4),stopLoss:+stopLoss.toFixed(4),score:sig.score,pnl:null,mode:this.mode,fee:+(invest*fee).toFixed(4),ts:new Date().toISOString(),strategy:sig.strategy||"ENSEMBLE"};
           newTrades.push(trade);this.dailyTrades.count++;
           const g=PAIRS.find(p=>p.symbol===sig.symbol)?.group||"";groupCount[g]=(groupCount[g]||0)+1;
@@ -678,13 +921,30 @@ class CryptoBotFinal {
       pairScores:this.pairScores,marketRegime:this.marketRegime,
       fearGreed:this.fearGreed,
       fearGreedPublished:this.fearGreedPublished||null,
-      fearGreedSource:this.fearGreedSource||"unknown",dailyTrades:this.dailyTrades,dailyLimit,
+      fearGreedSource:this.fearGreedSource||"unknown",
+      longShortRatio:this.longShortRatio||null,
+      fundingRate:this.fundingRate||null,
+      redditSentiment:this.redditSentiment||null,
+      openInterest:this.openInterest||null,
+      takerVolume:this.takerVolume||null,
+      dailyTrades:this.dailyTrades,dailyLimit,
       totalFees:+this.log.reduce((s,l)=>s+(l.fee||0),0).toFixed(2),
       contrafactualLog:this.contrafactualLog.slice(0,10),
       useBnb:this.useBnb,recentWinRate:wr,
       priceHistory:Object.fromEntries(Object.entries(this.history||{}).map(([k,v])=>[k,v.slice(-200)])),
       volumeAnomaly:Object.fromEntries(Object.keys(this.volumeHistory||{}).map(k=>[k,getVolumeAnomaly(this.volumeHistory,k)])),
       riskLearningStats:this.riskLearning.getStats(),
+      qLearningStats:{
+        states:Object.keys(this.qLearning.Q||{}).length,
+        epsilon:+((this.qLearning.epsilon||0.15).toFixed(3)),
+        replayBuffer:(this.qLearning._replayBuffer||[]).length,
+      },
+      dqnStats:this.dqn?.getStats()||null,
+      multiAgentStats:this.multiAgent?.getAllStats()||null,
+      stratEvalStats:this.stratEval?.getStats()||null,
+      dqnStats:this.dqn.getStats(),
+      streakMult:+(this._streakMult||1.0).toFixed(2),
+      walkForwardResult:this.walkForwardResult||null,
       riskLearningParams:this.riskLearning.params,
       correlationStatus:this.corrManager.getStatus(this.portfolio,this.prices),
       maxEquity:+this.maxEquity.toFixed(2),drawdownPct:+(dd*100).toFixed(2),
@@ -702,6 +962,9 @@ class CryptoBotFinal {
       cfMemory:this.cfMemory.toJSON(),
       qLearning:this.qLearning.toJSON(),
       ensemble:this.ensemble.toJSON(),
+      dqn:this.dqn.toJSON(),
+      multiAgent:this.multiAgent.toJSON(),
+      stratEval:this.stratEval.toJSON(),
     };
     return JSON.stringify(s);
   }

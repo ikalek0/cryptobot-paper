@@ -14,12 +14,14 @@ class QLearning {
   }
 
   // ── State encoding ──────────────────────────────────────────────────────
-  encodeState({ rsi, bbZone, regime, trend, volumeRatio, atrLevel }) {
+  encodeState({ rsi, bbZone, regime, trend, volumeRatio, atrLevel, fearGreed }) {
     const rsiBin = rsi < 25 ? 'vs_low' : rsi < 35 ? 'low' : rsi < 45 ? 'mid_low' :
                    rsi < 55 ? 'mid' : rsi < 65 ? 'mid_high' : rsi < 75 ? 'high' : 'vs_high';
     const atrBin = atrLevel < 0.5 ? 'calm' : atrLevel < 1.5 ? 'normal' : 'volatile';
     const volBin = volumeRatio > 1.5 ? 'high_vol' : volumeRatio < 0.7 ? 'low_vol' : 'normal_vol';
-    return `${regime}|${rsiBin}|${bbZone}|${trend}|${atrBin}|${volBin}`;
+    // F&G como feature: el bot aprende que en pánico extremo los rebotes son menos fiables
+    const fgBin = fearGreed == null ? '' : fearGreed < 20 ? '|fg_panic' : fearGreed < 40 ? '|fg_fear' : fearGreed > 75 ? '|fg_greed' : '';
+    return `${regime}|${rsiBin}|${bbZone}|${trend}|${atrBin}|${volBin}${fgBin}`;
   }
 
   _initState(key) {
@@ -44,7 +46,12 @@ class QLearning {
     this._initState(nextState);
     const maxNextQ = Math.max(...Object.values(this.Q[nextState]));
     const oldQ = this.Q[state][action];
-    this.Q[state][action] = oldQ + this.alpha * (reward + this.gamma * maxNextQ - oldQ);
+    // Learning rate adaptativo: decrece al visitar el mismo estado más veces
+    if (!this._stateVisits) this._stateVisits = {};
+    const visits = (this._stateVisits[state]||0) + 1;
+    this._stateVisits[state] = visits;
+    const adaptAlpha = Math.max(0.05, this.alpha / (1 + visits * 0.005));
+    this.Q[state][action] = oldQ + adaptAlpha * (reward + this.gamma * maxNextQ - oldQ);
   }
 
   // ── Record outcome of a trade ────────────────────────────────────────────
@@ -86,11 +93,44 @@ class QLearning {
       .slice(0, topN);
   }
 
-  toJSON() { return { Q: this.Q, epsilon: this.epsilon, alpha: this.alpha, gamma: this.gamma }; }
+  // ── Batch update: aprender de múltiples trades a la vez ──────────────────
+  // Más estable que aprender de 1 trade a la vez
+  batchUpdate(experiences) {
+    // experiences: [{state, action, reward, nextState}]
+    if (!experiences?.length) return;
+    for (const exp of experiences) {
+      this.update(exp.state, exp.action, exp.reward, exp.nextState);
+    }
+  }
+
+  // ── Experience replay buffer ──────────────────────────────────────────────
+  // Guarda los últimos N trades para re-aprender periódicamente
+  addToReplayBuffer(state, action, reward, nextState) {
+    if (!this._replayBuffer) this._replayBuffer = [];
+    this._replayBuffer.push({state, action, reward, nextState, ts: Date.now()});
+    if (this._replayBuffer.length > 200) this._replayBuffer.shift();
+  }
+
+  // Re-aprender de experiencias pasadas (llámalo cada 50 trades)
+  experienceReplay(batchSize = 20) {
+    if (!this._replayBuffer?.length) return 0;
+    const buf = this._replayBuffer;
+    // Sample aleatorio del buffer (favoreciendo más recientes)
+    const batch = [];
+    for (let i = 0; i < Math.min(batchSize, buf.length); i++) {
+      const idx = Math.floor(Math.random() * buf.length);
+      batch.push(buf[idx]);
+    }
+    this.batchUpdate(batch);
+    return batch.length;
+  }
+
+  toJSON() { return { Q: this.Q, epsilon: this.epsilon, alpha: this.alpha, gamma: this.gamma, replayBuffer: this._replayBuffer?.slice(-100) }; }
   loadJSON(data) {
     if (!data) return;
     if (data.Q) this.Q = data.Q;
     if (data.epsilon !== undefined) this.epsilon = data.epsilon;
+    if (data.replayBuffer) this._replayBuffer = data.replayBuffer;
   }
 }
 
