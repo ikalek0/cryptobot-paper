@@ -389,6 +389,12 @@ class CryptoBotFinal {
         if(saved.learningData.stratEval) this.stratEval.loadJSON(saved.learningData.stratEval);
         this.ensemble.loadJSON(saved.learningData.ensemble);
       }
+      // Safety: si el estado restaurado tiene capital casi en 0 (crash mid-trade)
+      // y no hay posiciones abiertas → resetear cash al capital inicial
+      if(this.totalValue() < INITIAL_CAPITAL * 0.01 && Object.keys(this.portfolio).length === 0) {
+        console.warn(`[ENGINE] ⚠️ Cash casi en 0 sin posiciones abiertas → reseteando a $${INITIAL_CAPITAL}`);
+        this.cash = INITIAL_CAPITAL;
+      }
       console.log(`[ENGINE v3] Restaurado tick #${this.tick} | $${this.totalValue().toFixed(2)}`);
     }else{
       this.prices={};this.history={};this.portfolio={};

@@ -449,6 +449,7 @@ function startLoop() {
     // En PAPER: límite diario muy alto para aprender más
     // Sobreescribimos getDailyLimit para que sea siempre 50 en paper
     const { signals, newTrades, circuitBreaker, optimizerResult, drawdownAlert, dailyLimit, dailyUsed } = bot.evaluate();
+    const newTradesThisTick = newTrades || [];
     ticks++;
 
     for(const trade of newTrades) {
