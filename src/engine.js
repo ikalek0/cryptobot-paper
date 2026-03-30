@@ -743,7 +743,11 @@ class CryptoBotFinal {
           const ensResult=this.ensemble.vote({rsi:rsiVal,bb,bbZone,price,regime:this.marketRegime,ema20,ema50,volumeRatio:volData.ratio,trend:trendData.direction,atr:atrVal});
 
           // Triple consensus: Q-table + DQN + Multi-agent todos de acuerdo
-          const maAction = this.multiAgent?.chooseAction(dqnStateVec, this.marketRegime)||qAction;
+          // dqnState may not exist if totalTrades < 50 - use safe fallback
+          const _dqnVec = sig._dqnState || null;
+          const maAction = (_dqnVec && this.multiAgent)
+            ? (this.multiAgent.chooseAction(_dqnVec, this.marketRegime)||qAction)
+            : qAction;
           const allAgree  = dqnAction==="BUY" && maAction==="BUY" && qAction!=="SKIP";
           const anyVeto   = dqnAction==="SKIP" && maAction==="SKIP" && qAction==="SKIP";
           const dqnBoost  = allAgree ? 1.25 : dqnConsensus && dqnAction==="BUY" ? 1.1 : 1.0;
