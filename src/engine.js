@@ -740,11 +740,14 @@ class CryptoBotFinal {
           }
           // Consensus: si Q-table y DQN coinciden → más confianza
           const dqnConsensus = dqnAction === qAction;
-          // Triple consensus boost: todos de acuerdo en BUY → mayor confianza
-          const dqnBoost = allAgree ? 1.25 : dqnConsensus && dqnAction==="BUY" ? 1.1 : 1.0;
-          // Triple veto: todos de acuerdo en SKIP → no entrar
-          if(anyVeto && learningPhase>=2) continue;
           const ensResult=this.ensemble.vote({rsi:rsiVal,bb,bbZone,price,regime:this.marketRegime,ema20,ema50,volumeRatio:volData.ratio,trend:trendData.direction,atr:atrVal});
+
+          // Triple consensus: Q-table + DQN + Multi-agent todos de acuerdo
+          const maAction = this.multiAgent?.chooseAction(dqnStateVec, this.marketRegime)||qAction;
+          const allAgree  = dqnAction==="BUY" && maAction==="BUY" && qAction!=="SKIP";
+          const anyVeto   = dqnAction==="SKIP" && maAction==="SKIP" && qAction==="SKIP";
+          const dqnBoost  = allAgree ? 1.25 : dqnConsensus && dqnAction==="BUY" ? 1.1 : 1.0;
+          if(anyVeto && learningPhase>=2) continue;
 
           // Fase 1: sin filtro ensemble/Q — opera todo para aprender
           // Fase 2: solo bloquea si ensemble muy negativo
