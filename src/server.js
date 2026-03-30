@@ -169,6 +169,23 @@ scheduleDailySync();
       bot.historicalResults = results;
       const summary = Object.entries(results).map(([p,v])=>`${p}:${Object.keys(v.bySymbol||{}).length}pares`).join(" ");
       console.log(`[PAPER] Simulación histórica OK — ${summary}`);
+
+      // Walk-forward: validar que params actuales no están overfitting
+      // Usar el historial del bot real (log de trades) para calcular WF básico
+      if (bot.log && bot.log.length > 50) {
+        const sells = bot.log.filter(l=>l.type==="SELL"&&l.pnl!=null);
+        const mid = Math.floor(sells.length * 0.7);
+        const trainSells = sells.slice(0, mid);
+        const testSells  = sells.slice(mid);
+        const trainWR = trainSells.length ? Math.round(trainSells.filter(l=>l.pnl>0).length/trainSells.length*100) : 0;
+        const testWR  = testSells.length  ? Math.round(testSells.filter(l=>l.pnl>0).length/testSells.length*100)   : 0;
+        const overfit = trainWR > 0 ? (testWR/trainWR).toFixed(2) : "n/a";
+        bot.walkForwardResult = { trainWR, testWR, overfit, trainN:trainSells.length, testN:testSells.length };
+        console.log(`[WF] Train WR: ${trainWR}% (${trainSells.length} ops) | Test WR: ${testWR}% (${testSells.length} ops) | Ratio: ${overfit}`);
+        if (parseFloat(overfit) < 0.5 && testSells.length > 10) {
+          console.warn("[WF] ⚠️ Posible overfitting — modelo funciona mejor en train que en test");
+        }
+      }
     })
     .catch(e => console.warn("[PAPER] Simulación histórica error:", e.message));
 

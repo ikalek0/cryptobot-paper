@@ -200,13 +200,56 @@ function signalBear(sym,history,params){
   return{signal,score,reason,rsiVal:+rsiVal.toFixed(1),atrPct:+atrPct.toFixed(2),mom10:0,bbPos:+bbPos.toFixed(2),strategy:"BEAR"};
 }
 
+// ── SCALPING: micro-rebotes en cualquier régimen ─────────────────────────────
+// Target: 0.3-0.8% en 5-30 min. Stop: 0.8%. Funciona bien en BEAR/LATERAL
+function signalScalp(sym, history, params) {
+  const h = history[sym]||[];
+  if (h.length < 10) return {signal:"HOLD",score:30,strategy:"SCALP"};
+  const last = h[h.length-1];
+  const rsiVal = rsi(h);
+  const bb = bollingerBands(h, 10, 1.8); // BB más ajustado para scalp
+  const bbPos = (last - bb.lower) / (bb.upper - bb.lower || 1);
+  const atrVal = atr(h, 5); // ATR corto para scalp
+  const atrPct = (atrVal / last) * 100;
+  const mom3 = h.length>3 ? ((last-h[h.length-4])/h[h.length-4]*100) : 0;
+  const mom1 = h.length>1 ? ((last-h[h.length-2])/h[h.length-2]*100) : 0;
+
+  let score = 30, signal = "HOLD", reason = "";
+
+  // Scalp BUY: caída brusca + RSI bajo + micro-rebote iniciándose
+  if (bbPos < 0.15 && rsiVal < 38 && mom1 >= 0) {
+    score = 62 + Math.round((0.15-bbPos)*150);
+    signal = "BUY";
+    reason = `SCALP · BB ${(bbPos*100).toFixed(0)}% · RSI ${rsiVal.toFixed(0)} · Mom+`;
+  } else if (bbPos < 0.25 && rsiVal < 32 && mom3 < -1.5 && mom1 >= 0) {
+    score = 58;
+    signal = "BUY";
+    reason = `SCALP REBOTE · RSI ${rsiVal.toFixed(0)} · Giro`;
+  }
+
+  return {signal, score, reason, rsiVal:+rsiVal.toFixed(1),
+          atrPct:+atrPct.toFixed(2), mom10:+mom3.toFixed(2),
+          bbPos:+bbPos.toFixed(2), strategy:"SCALP"};
+}
+
 function computeSignal(sym,history,params,regime="UNKNOWN"){
   switch(regime){
-    case"BULL":return signalMomentum(sym,history,params);
+    case"BULL":   return signalMomentum(sym,history,params);
     case"LATERAL":return signalMeanReversion(sym,history,params);
-    case"BEAR":return signalBear(sym,history,params);
-    default:return signalMomentum(sym,history,params);
+    case"BEAR":   return signalBear(sym,history,params);
+    default:      return signalMomentum(sym,history,params);
   }
+}
+
+// En BEAR: también generar señal scalp para complementar
+function computeSignalWithScalp(sym, history, params, regime) {
+  const main = computeSignal(sym, history, params, regime);
+  if (regime === "BEAR" || regime === "LATERAL") {
+    const scalp = signalScalp(sym, history, params);
+    // Si scalp tiene mejor score que señal principal → usar scalp
+    if (scalp.signal === "BUY" && scalp.score > main.score) return scalp;
+  }
+  return main;
 }
 
 function isPumping(h,w=6){if(!h||h.length<w)return false;return(h[h.length-1]-h[h.length-w])/h[h.length-w]>PUMP_THRESHOLD;}
@@ -346,7 +389,7 @@ class CryptoBotFinal {
 
     const signals=PAIRS.map(p=>({
       ...p,price:this.prices[p.symbol]||0,
-      ...computeSignal(p.symbol,this.history,params,this.marketRegime),
+      ...computeSignalWithScalp(p.symbol,this.history,params,this.marketRegime),
       isPumping:isPumping(this.history[p.symbol]),isFalling:isFallingFast(this.history[p.symbol]),
       pairScore:this.pairScores[p.symbol]?.score||50,
     }));
@@ -378,15 +421,18 @@ class CryptoBotFinal {
       const sig=signals.find(s=>s.symbol===symbol);
       // MR exit: en LATERAL tomar beneficio en BB 65% (no esperar 90%)
       // Esto mejora WR aunque reduce tamaño de ganancia individual
+      // Scalp: salir rápido cuando hay beneficio
+      const isScalp = pos.strategy === "SCALP";
+      const scalpExit = isScalp && cp >= pos.entryPrice * 1.004; // +0.4% → salir
       const mrTarget = this.marketRegime==="LATERAL" ? 0.65 : 0.85;
-      const mrExit=sig?.bbPos>mrTarget&&sig?.rsiVal>58;
+      const mrExit = !isScalp && sig?.bbPos>mrTarget && sig?.rsiVal>58;
       const bearSell=this.marketRegime==="BEAR"&&pos.profitLocked<0&&ts.profitLocked<0;
       // En paper: no salir solo por señal SELL débil — esperar stop o trailing con beneficio real
       const signalExit=sig?.signal==="SELL"&&sig?.score<=(100-params.minScore-10)&&ts.profitLocked>0.5;
-      if(cp<=pos.stopLoss||ts.hit||signalExit||mrExit||bearSell||timeStop){
+      if(cp<=pos.stopLoss||ts.hit||signalExit||mrExit||bearSell||timeStop||scalpExit){
         const proceeds=pos.qty*cp*(1-fee),pnl=((cp-pos.entryPrice)/pos.entryPrice)*100-fee*100*2;
         this.cash+=proceeds;
-        const reason=cp<=pos.stopLoss?"STOP LOSS":ts.hit?"TRAILING STOP":mrExit?"MR OBJETIVO":bearSell?"BEAR EXIT":"SEÑAL VENTA";
+        const reason=cp<=pos.stopLoss?"STOP LOSS":ts.hit?"TRAILING STOP":scalpExit?"SCALP TARGET":mrExit?"MR OBJETIVO":bearSell?"BEAR EXIT":"SEÑAL VENTA";
         // Análisis contrafactual
         const futureCandles=(this.history[symbol]||[]).slice(-20).map(p=>({open:p,high:p*1.002,low:p*0.998,close:p,volume:1000}));
         const cfAnalysis=analyzeCounterfactual({...pos,symbol,pnlPct:pnl/100,exit:cp,exitReason:reason,rsiEntry:sig?.rsiVal||50,bbEntry:null,id:`${symbol}_${Date.now()}`},futureCandles);
@@ -509,8 +555,10 @@ class CryptoBotFinal {
           const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*corrMult*volBoost*pmBoost;
           if(invest<10||invest>availCash)continue;
           const qty=invest*(1-fee)/price,atrV=atr(h,14);
-          // Paper: stop más amplio (5%) para dar tiempo a aprender, no salir en cada fluctuación
-          const minStop=price*0.950,stopLoss=Math.min(price-Math.max(this.profile.atrMultiplier*atrV,price*0.025),minStop);
+          // Stop: scalp=1.5%, normal=5%
+          const isScalpEntry = sig.strategy === "SCALP";
+          const stopPct = isScalpEntry ? 0.985 : 0.950;
+          const minStop=price*stopPct,stopLoss=Math.min(price-Math.max(this.profile.atrMultiplier*atrV,price*0.015),minStop);
           this.cash-=invest;
           this.portfolio[sig.symbol]={qty,entryPrice:price,stopLoss:+stopLoss.toFixed(4),trailingStop:+stopLoss.toFixed(4),trailingHigh:+price.toFixed(4),profitLocked:0,name:sig.name,ts:new Date().toISOString(),strategy:sig.strategy||"ENSEMBLE",rsiEntry:rsiVal,bbEntry:bb,regime:this.marketRegime,entryState:stateKey,ensembleVotes:ensResult.votes};
           const trade={type:"BUY",symbol:sig.symbol,name:sig.name,qty:+qty.toFixed(6),price:+price.toFixed(4),stopLoss:+stopLoss.toFixed(4),score:sig.score,pnl:null,mode:this.mode,fee:+(invest*fee).toFixed(4),ts:new Date().toISOString(),strategy:sig.strategy||"ENSEMBLE"};

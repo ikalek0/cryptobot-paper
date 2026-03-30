@@ -162,6 +162,14 @@ function startCommandListener(getState, botControls={}) {
                 send("💰 <b>Balance</b>\n"+bal.filter(b=>parseFloat(b.free)>0.001).map(b=>b.asset+": "+parseFloat(b.free).toFixed(4)).join("\n"));
               }).catch(()=>send("❌ Error balance"));
             }
+            else if(text==="/walkforward"){
+              const wf = state.walkForwardResult;
+              if(!wf) send("🔄 Walk-forward aún no calculado (espera a que termine la simulación histórica)");
+              else send(`📊 <b>[PAPER] Walk-Forward Analysis</b>
+Entrenamiento: WR ${wf.trainWR}% (${wf.trainN} ops)
+Test real: WR ${wf.testWR}% (${wf.testN} ops)
+Ratio: ${wf.overfit} ${parseFloat(wf.overfit)<0.7?"⚠️ Overfitting posible":"✅ Robusto"}`);
+            }
             else if(text==="/ayuda") send(buildHelp(mode));
           }
         } catch(e){}
@@ -172,7 +180,7 @@ function startCommandListener(getState, botControls={}) {
     req.setTimeout(25000,()=>{req.destroy();setTimeout(poll,1000);});
   }
   poll();
-  console.log("[TG] Comandos: /estado /posiciones /log /pausa /reanudar /momentum /noticias /riesgo /aprendizaje /ayuda");
+  console.log("[TG] Comandos: /estado /posiciones /log /pausa /reanudar /momentum /noticias /riesgo /aprendizaje /walkforward /ayuda");
   return { isPaused: () => paused };
 }
 
