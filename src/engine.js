@@ -288,6 +288,22 @@ function runContrafactual(sym,history,ticksBack=10){
   return{symbol:sym,ticksBack,entryPrice:+ep.toFixed(4),currentPrice:+cp.toFixed(4),pnl:+((cp-ep)/ep*100).toFixed(2)};
 }
 
+// ── Stop dinámico basado en ATR (igual que live) ─────────────────────────────
+function calcDynamicStop(entryPrice, atrVal, regime) {
+  const atrPct = atrVal / entryPrice;
+  let multiplier;
+  if      (atrPct < 0.005) multiplier = 1.5;
+  else if (atrPct < 0.015) multiplier = 2.0;
+  else if (atrPct < 0.030) multiplier = 2.5;
+  else                     multiplier = 3.0;
+  if (regime === "BEAR")    multiplier *= 1.2; // más amplio en BEAR
+  if (regime === "LATERAL") multiplier *= 0.9; // más ajustado en LATERAL
+  multiplier = Math.min(3.5, Math.max(1.5, multiplier));
+  const stop = entryPrice - atrVal * multiplier;
+  const stopPct = ((entryPrice - stop) / entryPrice * 100).toFixed(2) + "%";
+  return { stop: Math.max(stop, entryPrice * 0.92), stopPct }; // max 8% stop
+}
+
 // ── CLASE PRINCIPAL ───────────────────────────────────────────────────────────
 class CryptoBotFinal {
   constructor(saved=null){
@@ -437,6 +453,12 @@ class CryptoBotFinal {
         const futureCandles=(this.history[symbol]||[]).slice(-20).map(p=>({open:p,high:p*1.002,low:p*0.998,close:p,volume:1000}));
         const cfAnalysis=analyzeCounterfactual({...pos,symbol,pnlPct:pnl/100,exit:cp,exitReason:reason,rsiEntry:sig?.rsiVal||50,bbEntry:null,id:`${symbol}_${Date.now()}`},futureCandles);
         this.cfMemory.add(cfAnalysis);
+        // Aprender del contrafactual: si habría ganado más aguantando → Q-Learning bonus
+        if(cfAnalysis && cfAnalysis.holdReturn > 0 && pnl < 0) {
+          // Salimos con pérdida pero aguantar habría dado ganancia → reforzar HOLD en este estado
+          const cfReward = Math.min(0.5, cfAnalysis.holdReturn * 5);
+          if(pos.entryState) this.qLearning.update(pos.entryState, "HOLD", cfReward, pos.entryState);
+        }
         // Actualizar pattern memory y Q-Learning
         const win=pnl>0;
         this.patternMemory.recordTrade(symbol,{rsiEntry:pos.rsiEntry||50,bbEntry:pos.bbEntry,entryPrice:pos.entryPrice,regime:pos.regime||this.marketRegime,pnlPct:pnl/100,win});
@@ -449,7 +471,7 @@ class CryptoBotFinal {
         const closeVolRatio=getVolumeAnomaly(this.volumeHistory,symbol).ratio;
         const nextState=this.qLearning.encodeState({rsi:closeRsi,bbZone:closeBBZone,regime:this.marketRegime,trend:closeTrend.direction,volumeRatio:closeVolRatio,atrLevel:closeAtr});
         this.qLearning.recordTradeOutcome(pos.entryState,pnl/100,nextState);
-        this.qLearning.decayEpsilon();
+        this.qLearning.decayEpsilon(0.03, 0.9995, totalTrades);
         if(pos.ensembleVotes) this.ensemble.updateWeights(pos.ensembleVotes,win);
         if(Math.random()<0.05) this.patternMemory.updateCorrelations();
         delete this.portfolio[symbol];this.trailing.remove(symbol);
@@ -555,10 +577,16 @@ class CryptoBotFinal {
           const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen)*this.hourMultiplier*fearAdj*corrMult*volBoost*pmBoost;
           if(invest<10||invest>availCash)continue;
           const qty=invest*(1-fee)/price,atrV=atr(h,14);
-          // Stop: scalp=1.5%, normal=5%
           const isScalpEntry = sig.strategy === "SCALP";
-          const stopPct = isScalpEntry ? 0.985 : 0.950;
-          const minStop=price*stopPct,stopLoss=Math.min(price-Math.max(this.profile.atrMultiplier*atrV,price*0.015),minStop);
+          let stopLoss;
+          if (isScalpEntry) {
+            // Scalp: stop fijo 1.5%
+            stopLoss = price * 0.985;
+          } else {
+            // Stop dinámico ATR (igual que live)
+            const dynStop = calcDynamicStop(price, atrV, this.marketRegime);
+            stopLoss = dynStop.stop;
+          }
           this.cash-=invest;
           this.portfolio[sig.symbol]={qty,entryPrice:price,stopLoss:+stopLoss.toFixed(4),trailingStop:+stopLoss.toFixed(4),trailingHigh:+price.toFixed(4),profitLocked:0,name:sig.name,ts:new Date().toISOString(),strategy:sig.strategy||"ENSEMBLE",rsiEntry:rsiVal,bbEntry:bb,regime:this.marketRegime,entryState:stateKey,ensembleVotes:ensResult.votes};
           const trade={type:"BUY",symbol:sig.symbol,name:sig.name,qty:+qty.toFixed(6),price:+price.toFixed(4),stopLoss:+stopLoss.toFixed(4),score:sig.score,pnl:null,mode:this.mode,fee:+(invest*fee).toFixed(4),ts:new Date().toISOString(),strategy:sig.strategy||"ENSEMBLE"};

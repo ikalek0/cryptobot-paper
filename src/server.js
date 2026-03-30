@@ -330,6 +330,26 @@ broadcast({ type:"tick", data:{ ...bot.getState(), signals, newTrades, circuitBr
 
     // Enviar equity a BAFIR como instancia paper
     if(ticks%60===0) sendEquityToBafirPaper(bot.totalValue());
+    // Re-simulación histórica cada 6h con datos frescos de Binance
+    if(ticks%10800===0 && ticks>0) {
+      const HIST_SYMBOLS = ["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC","ADAUSDC","XRPUSDC","LINKUSDC","AVAXUSDC"];
+      console.log("[PAPER] Re-simulación histórica periódica (6h)...");
+      runHistoricalSimulation(HIST_SYMBOLS, "1h")
+        .then(results => {
+          bot.historicalResults = results;
+          // Re-ejecutar walk-forward con datos actualizados
+          if(bot.log && bot.log.length > 50) {
+            const sells = bot.log.filter(l=>l.type==="SELL"&&l.pnl!=null);
+            const mid = Math.floor(sells.length * 0.7);
+            const testWR = sells.slice(mid).length ? Math.round(sells.slice(mid).filter(l=>l.pnl>0).length/sells.slice(mid).length*100) : 0;
+            const trainWR = sells.slice(0,mid).length ? Math.round(sells.slice(0,mid).filter(l=>l.pnl>0).length/sells.slice(0,mid).length*100) : 0;
+            bot.walkForwardResult = {trainWR, testWR, overfit:(testWR/Math.max(trainWR,1)).toFixed(2), trainN:mid, testN:sells.length-mid};
+            console.log(`[WF] Train:${trainWR}% Test:${testWR}% Ratio:${bot.walkForwardResult.overfit}`);
+          }
+          console.log("[PAPER] Re-simulación OK");
+        })
+        .catch(e => console.warn("[PAPER] Re-simulación error:", e.message));
+    }
     // Sync Q-states al live cada hora (aprendizaje continuo, no solo a las 3am)
     if(ticks%1800===0 && bot.qLearning) {
       const qStats = bot.qLearning.getTopStates(20);

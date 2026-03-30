@@ -59,8 +59,11 @@ class QLearning {
   encodeState_fromLast() { return this.lastState; }
 
   // ── Decay epsilon over time ──────────────────────────────────────────────
-  decayEpsilon(minEpsilon = 0.05, factor = 0.9995) {
-    this.epsilon = Math.max(minEpsilon, this.epsilon * factor);
+  decayEpsilon(minEpsilon = 0.03, factor = 0.9995, totalTrades = 0) {
+    // Más agresivo después de 500 trades - ya exploró suficiente
+    const adjustedMin = totalTrades > 500 ? 0.03 : totalTrades > 200 ? 0.05 : 0.08;
+    const adjustedFactor = totalTrades > 500 ? 0.999 : 0.9995;
+    this.epsilon = Math.max(adjustedMin, this.epsilon * adjustedFactor);
   }
 
   // ── Stats ────────────────────────────────────────────────────────────────
