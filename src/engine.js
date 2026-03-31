@@ -513,7 +513,8 @@ class CryptoBotFinal {
         // Subir stop al break-even una vez tomado beneficio parcial
         this.portfolio[symbol].stopLoss = Math.max(pos.stopLoss, pos.entryPrice * 1.001);
         const pnlPart = (cp - pos.entryPrice) / pos.entryPrice * 100 - fee * 200;
-        const partialTrade = {type:"SELL",symbol,name:pos.name,qty:+partialQty.toFixed(6),price:+cp.toFixed(4),pnl:+pnlPart.toFixed(2),reason:"PARTIAL EXIT",mode:this.mode,fee:+(partialQty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"ENSEMBLE"};
+        const partialPnlAbs = +(partialQty * cp * (pnlPart/100)).toFixed(2);
+        const partialTrade = {type:"SELL",symbol,name:pos.name,qty:+partialQty.toFixed(6),price:+cp.toFixed(4),pnl:+pnlPart.toFixed(2),pnlAbs:partialPnlAbs,reason:"PARTIAL EXIT",mode:this.mode,fee:+(partialQty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"ENSEMBLE"};
         newTrades.push(partialTrade);
         console.log(`[PAPER][PARTIAL] ${symbol} +${pnlPart.toFixed(2)}% → 50% vendido, stop→BE`);
       }
@@ -647,7 +648,8 @@ class CryptoBotFinal {
           this._pairStreak[symbol].losses=0; // boost on winning streak
         }
         if(this._smartPause&&Date.now()>this._smartPause) this._smartPause=null;
-        const trade={type:"SELL",symbol,name:pos.name,qty:+pos.qty.toFixed(6),price:+cp.toFixed(4),pnl:+pnl.toFixed(2),reason,mode:this.mode,fee:+(pos.qty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"MOMENTUM"};
+        const pnlAbs = +(pos.qty * cp * (pnl/100)).toFixed(2); // P&L en USD absoluto
+        const trade={type:"SELL",symbol,name:pos.name,qty:+pos.qty.toFixed(6),price:+cp.toFixed(4),pnl:+pnl.toFixed(2),pnlAbs,reason,mode:this.mode,fee:+(pos.qty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"MOMENTUM"};
         newTrades.push(trade);this.dailyTrades.count++;
         this.optimizer.recordTrade(pnl,reason);updatePairScore(this.pairScores,symbol,pnl);
         this.stratEval.recordTrade(pos.strategy, this.marketRegime, pnl);
