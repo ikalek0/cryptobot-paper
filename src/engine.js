@@ -890,7 +890,9 @@ class CryptoBotFinal {
             const dynStop = calcDynamicStop(price, atrV, this.marketRegime);
             stopLoss = dynStop.stop;
           }
-          this.cash-=invest;
+          this.cash = Math.max(0, this.cash - invest);
+          // Recalcular para siguiente trade del mismo tick
+          availCash = Math.max(0, this.cash - this.totalValue()*0.05);
           this.portfolio[sig.symbol]={qty,entryPrice:price,stopLoss:+stopLoss.toFixed(4),trailingStop:+stopLoss.toFixed(4),trailingHigh:+price.toFixed(4),profitLocked:0,name:sig.name,ts:new Date().toISOString(),strategy:sig.strategy||"ENSEMBLE",rsiEntry:rsiVal,bbEntry:bb,regime:this.marketRegime,entryState:stateKey,dqnState:sig._dqnState||null,dqnAction:dqnAction||"BUY",ensembleVotes:ensResult.votes};
           const trade={type:"BUY",symbol:sig.symbol,name:sig.name,qty:+qty.toFixed(6),price:+price.toFixed(4),stopLoss:+stopLoss.toFixed(4),score:sig.score,pnl:null,mode:this.mode,fee:+(invest*fee).toFixed(4),ts:new Date().toISOString(),strategy:sig.strategy||"ENSEMBLE"};
           newTrades.push(trade);this.dailyTrades.count++;
