@@ -664,7 +664,7 @@ class CryptoBotFinal {
       // Posiciones máximas según fase
       const maxPos = PAIRS.length; // paper: siempre máximas posiciones para aprender
       if(nOpen<maxPos){
-        const reserve=this.totalValue()*MIN_CASH_RESERVE,availCash=Math.max(0,this.cash-reserve);
+        const reserve=this.totalValue()*MIN_CASH_RESERVE; let availCash=Math.max(0,this.cash-reserve);
         // Score mínimo progresivo
         // Si WR muy bajo, exigir señales más fuertes para aprender qué funciona
         const baseMin = learningPhase === 1 ? 20 : learningPhase === 2 ? 35 : (this.marketRegime==="BEAR"?55:45);
