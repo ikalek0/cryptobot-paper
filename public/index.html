@@ -241,15 +241,13 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
           <button class="pair-btn" onclick="setActivePair('NEARUSDT',this)">NEAR</button>
           <button class="pair-btn" onclick="setActivePair('APTUSDT',this)">APT</button>
         </div>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-          <div class="period-selector" style="margin-bottom:0">
-            <button class="ps-btn active" onclick="setPeriod('1H',this)">1H</button>
-            <button class="ps-btn" onclick="setPeriod('1D',this)">1D</button>
-            <button class="ps-btn" onclick="setPeriod('1W',this)">1S</button>
-            <button class="ps-btn" onclick="setPeriod('1M',this)">1M</button>
-            <button class="ps-btn" onclick="setPeriod('ALL',this)">Todo</button>
-          </div>
-          <select id="pair-selector" onchange="setPairFilter(this.value)" style="font-size:10px;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg2);color:var(--text);cursor:pointer">
+        <div style="display:flex;align-items:center;gap:8px;margin:8px 0 6px">
+          <button class="ps-btn active" onclick="setPeriod('1H',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1H</button>
+          <button class="ps-btn" onclick="setPeriod('1D',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1D</button>
+          <button class="ps-btn" onclick="setPeriod('1W',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1S</button>
+          <button class="ps-btn" onclick="setPeriod('1M',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1M</button>
+          <button class="ps-btn" onclick="setPeriod('ALL',this)" style="font-size:13px;padding:5px 14px;font-weight:600">Todo</button>
+          <select id="pair-selector" onchange="setPairFilter(this.value)" style="margin-left:auto;font-size:11px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);cursor:pointer">
             <option value="ALL">Todos los pares</option>
           </select>
         </div>
@@ -787,6 +785,7 @@ function render() {
   document.getElementById("kpi-total").style.color = "var(--blue)";
 
   // Period-aware return
+  const periodEquity = filterByPeriod(window._equityHistory?.length?window._equityHistory:equityHistory, currentPeriod);
   const periodStartVal = periodEquity.length ? periodEquity[0].v : (s.equity?.[0]?.v || tv);
   const periodRet = periodStartVal > 0 ? ((tv - periodStartVal) / periodStartVal * 100) : ret;
   const periodLabel = {"1H":"última hora","1D":"hoy","1W":"esta semana","1M":"este mes","ALL":"desde inicio","Todo":"desde inicio"}[currentPeriod]||"período";
@@ -814,7 +813,7 @@ function render() {
   const periodPnlAbs = periodSells.reduce((s,l)=>s+(l.pnlAbs||0),0);
   const periodFees = periodSells.reduce((s,l)=>s+(l.fee||0),0);
   // Drawdown for period
-  const periodEquity = filterByPeriod(window._equityHistory?.length?window._equityHistory:equityHistory, currentPeriod);
+  
   let periodMaxDD = 0;
   if(periodEquity.length>1) {
     let peak=periodEquity[0].v;
