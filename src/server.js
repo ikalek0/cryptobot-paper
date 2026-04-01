@@ -450,6 +450,26 @@ function startLoop() {
       if (bot.trailing) bot.trailing._learnedTrailingMin = bot.riskLearning.get("trailingMinPct", 2) / 100;
     }
 
+    // Detectar cambio de régimen o F&G significativo → recalibrar sintéticos
+    const _prevRegime = bot._lastKnownRegime || bot.marketRegime;
+    const _prevFG     = bot._lastKnownFG     || bot.fearGreed || 50;
+    const _fgDelta    = Math.abs((bot.fearGreed||50) - _prevFG);
+    if(bot._lastKnownRegime && (bot.marketRegime !== _prevRegime || _fgDelta > 20)) {
+      console.log(`[REGIME-CHANGE] ${_prevRegime}→${bot.marketRegime} | F&G Δ${_fgDelta.toFixed(0)}`);
+      const currentTrades = (bot.log||[]).filter(l=>l.type==="SELL").length;
+      runFastLearn(bot, currentTrades + 200).catch(e=>console.warn("[RECAL]", e.message));
+      if(_fgDelta > 20 || bot.marketRegime !== _prevRegime) {
+        tg.send && tg.send(
+          `🔄 <b>[PAPER] Cambio detectado</b>\n` +
+          `Régimen: ${_prevRegime} → ${bot.marketRegime}\n` +
+          `F&G: ${Math.round(_prevFG)} → ${bot.fearGreed||50}\n` +
+          `Inyectando 200 trades sintéticos del nuevo contexto`
+        );
+      }
+    }
+    bot._lastKnownRegime = bot.marketRegime;
+    bot._lastKnownFG = bot.fearGreed || 50;
+
     // En PAPER: límite diario muy alto para aprender más
     // Sobreescribimos getDailyLimit para que sea siempre 50 en paper
     const { signals, newTrades, circuitBreaker, optimizerResult, drawdownAlert, dailyLimit, dailyUsed } = bot.evaluate();
