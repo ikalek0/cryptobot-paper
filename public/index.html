@@ -244,40 +244,7 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
 
   <div class="row row-21">
     <div class="card">
-      <div class="card-title">
-        <span>Curva de capital</span>
-        <div class="pair-selector">
-          <button class="pair-btn active" onclick="setActivePair('ALL',this)">Todo</button>
-          <button class="pair-btn" onclick="setActivePair('BTCUSDT',this)">BTC</button>
-          <button class="pair-btn" onclick="setActivePair('ETHUSDT',this)">ETH</button>
-          <button class="pair-btn" onclick="setActivePair('SOLUSDT',this)">SOL</button>
-          <button class="pair-btn" onclick="setActivePair('BNBUSDT',this)">BNB</button>
-          <button class="pair-btn" onclick="setActivePair('AVAXUSDT',this)">AVAX</button>
-          <button class="pair-btn" onclick="setActivePair('ADAUSDT',this)">ADA</button>
-          <button class="pair-btn" onclick="setActivePair('DOTUSDT',this)">DOT</button>
-          <button class="pair-btn" onclick="setActivePair('LINKUSDT',this)">LINK</button>
-          <button class="pair-btn" onclick="setActivePair('UNIUSDT',this)">UNI</button>
-          <button class="pair-btn" onclick="setActivePair('AAVEUSDT',this)">AAVE</button>
-          <button class="pair-btn" onclick="setActivePair('XRPUSDT',this)">XRP</button>
-          <button class="pair-btn" onclick="setActivePair('LTCUSDT',this)">LTC</button>
-          <button class="pair-btn" onclick="setActivePair('MATICUSDT',this)">MATIC</button>
-          <button class="pair-btn" onclick="setActivePair('OPUSDT',this)">OP</button>
-          <button class="pair-btn" onclick="setActivePair('ARBUSDT',this)">ARB</button>
-          <button class="pair-btn" onclick="setActivePair('ATOMUSDT',this)">ATOM</button>
-          <button class="pair-btn" onclick="setActivePair('NEARUSDT',this)">NEAR</button>
-          <button class="pair-btn" onclick="setActivePair('APTUSDT',this)">APT</button>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;margin:8px 0 6px">
-          <button class="ps-btn active" onclick="setPeriod('1H',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1H</button>
-          <button class="ps-btn" onclick="setPeriod('1D',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1D</button>
-          <button class="ps-btn" onclick="setPeriod('1W',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1S</button>
-          <button class="ps-btn" onclick="setPeriod('1M',this)" style="font-size:13px;padding:5px 14px;font-weight:600">1M</button>
-          <button class="ps-btn" onclick="setPeriod('ALL',this)" style="font-size:13px;padding:5px 14px;font-weight:600">Todo</button>
-          <select id="pair-selector" onchange="setPairFilter(this.value)" style="margin-left:auto;font-size:11px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);cursor:pointer">
-            <option value="ALL">Todos los pares</option>
-          </select>
-        </div>
-      </div>
+      <div class="card-title"><span>Curva de capital</span></div>
       <div class="chart-canvas-wrap">
         <canvas id="chart-canvas"></canvas>
         <div class="chart-crosshair" id="chart-crosshair"></div>
@@ -526,9 +493,12 @@ const fT  = ts => new Date(ts).toLocaleTimeString("es-ES",{hour:"2-digit",minute
 // ── CHART ─────────────────────────────────────────────────────────────────────
 let _currentPair = "ALL";
 function setPairFilter(pair) { _currentPair = pair; drawChart(); }
+
+const KNOWN_PAIRS = ["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC","XRPUSDC","ADAUSDC","AVAXUSDC","DOTUSDC","LINKUSDC","UNIUSDC","AAVEUSDC","LTCUSDC","MATICUSDC","OPUSDC","ARBUSDC","ATOMUSDC","NEARUSDC","APTUSDC"];
 function updatePairSelector(portfolio, trades) {
   const sel = document.getElementById("pair-selector"); if (!sel) return;
   const pairs = new Set(["ALL"]);
+  KNOWN_PAIRS.forEach(p=>pairs.add(p));
   Object.keys(portfolio||{}).forEach(s=>pairs.add(s));
   (trades||[]).forEach(t=>t.symbol&&pairs.add(t.symbol));
   const current = sel.value;
@@ -839,7 +809,7 @@ function render() {
   // Absolute gain (capital total - initial capital aportado)
   const gainEl = document.getElementById("kpi-gain-abs");
   if(gainEl) {
-    const absGain = tv - (typeof firstEquity==="object"?firstEquity?.v:firstEquity||tv);
+    const absGain = tv - (typeof initialCapital==="object"?initialCapital?.v:initialCapital||tv);
     gainEl.textContent = (absGain>=0?"+":"-")+fCur(Math.abs(absGain))+" ganancia total";
     gainEl.style.color = clr(absGain);
   }

@@ -1026,7 +1026,7 @@ class CryptoBotFinal {
       redditSentiment:this.redditSentiment||null,
       openInterest:this.openInterest||null,
       takerVolume:this.takerVolume||null,
-      dailyTrades:this.dailyTrades,dailyLimit,
+      dailyTrades:this.dailyTrades,dailyLimit:(()=>{const lp=this.learningPhase||3;return(lp===1?5000:lp===2?2000:500)+(this._dailyLimitBoost||0);})(),
       totalFees:+this.log.reduce((s,l)=>s+(l.fee||0),0).toFixed(2),
       contrafactualLog:this.contrafactualLog.slice(0,10),
       useBnb:this.useBnb,recentWinRate:wr,
