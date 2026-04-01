@@ -199,6 +199,7 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
     <div class="kpi">
       <div class="kpi-label">Win rate</div>
       <div class="kpi-value" id="kpi-wr">—</div>
+      <div class="kpi-sub" id="kpi-wr-sub" style="font-size:9px">—</div>
       <div class="kpi-sub" id="kpi-ops">—</div>
       <div class="kpi-accent"></div>
     </div>
@@ -288,11 +289,11 @@ main{padding:24px 28px;max-width:1400px;margin:0 auto}
         </div>
         <div class="separator"></div>
         <div style="display:flex;align-items:center;justify-content:space-between">
-          <span style="font-size:11px;color:var(--dim2)">Circuit breaker</span>
+          <span style="font-size:11px;color:var(--dim2)">Pérdida acumulada</span>
           <span style="font-size:11px;font-weight:500" id="cb-status">—</span>
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between">
-          <span style="font-size:11px;color:var(--dim2)">Drawdown máx.</span>
+          <span style="font-size:11px;color:var(--dim2)">Caída máxima</span>
           <span style="font-size:11px;font-weight:500" id="kpi-drawdown">—</span>
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between">
@@ -832,6 +833,11 @@ function render() {
 
   document.getElementById("kpi-wr").textContent = periodWR!=null ? periodWR+"%" : "—";
   document.getElementById("kpi-wr").style.color = periodWR!=null ? clr(periodWR-50) : "var(--text)";
+  // WR sub label: show threshold context
+  const wrSubEl = document.getElementById("kpi-wr-sub");
+  if(wrSubEl) wrSubEl.textContent = periodWR!=null
+    ? (periodWR>=50 ? "✅ Por encima del umbral" : "🔴 Por debajo del 50%")
+    : "Sin datos";
   const sells = allSells.length;
   document.getElementById("kpi-ops").textContent = periodSells.length+"/"+sells+" op"+(sells!==1?"s":"");
 
@@ -840,17 +846,17 @@ function render() {
   todayEl.textContent = (periodRet>=0?"+":"")+periodRet.toFixed(2)+"%";
   todayEl.style.color = clr(periodRet);
   const periodAbsPnl = tv - periodStartVal;
-  document.getElementById("kpi-today-sub").textContent = periodSells.length+" op"+(periodSells.length!==1?"s":"")+" · "+(periodAbsPnl>=0?"+":"")+"$"+Math.abs(periodAbsPnl).toFixed(2);
+  document.getElementById("kpi-today-sub").textContent = periodSells.length+" op"+(periodSells.length!==1?"s":"")+" · "+(periodAbsPnl>=0?"+":"-")+"$"+Math.abs(periodAbsPnl).toFixed(2);
   document.getElementById("kpi-today-sub").style.color = clr(periodRet);
   const acc = document.getElementById("kpi-today-accent");
   acc.className = "kpi-accent " + (periodRet>=0?"green":"red");
   // Drawdown KPI if exists
-  { const ddEl2 = document.getElementById("kpi-drawdown"); if(ddEl2) { ddEl2.textContent = "-"+periodMaxDD.toFixed(2)+"%"; ddEl2.style.color = periodMaxDD>5?"var(--red)":"var(--dim2)"; } }
+  { const ddEl2 = document.getElementById("kpi-drawdown"); if(ddEl2) { ddEl2.textContent = "-"+periodMaxDD.toFixed(2)+"%"; ddEl2.style.color = periodMaxDD>5?"var(--red)":periodMaxDD>1?"var(--gold)":"var(--green)"; } }
 
-  // Chart
-  drawChart();
+  // Chart (wrapped in try/catch so Estado del mercado always updates)
+  try { drawChart(); } catch(chartErr) { console.warn("[chart]", chartErr.message); }
   if (!window._chartResizeAdded) { window._chartResizeAdded=true; window.addEventListener("resize",()=>requestAnimationFrame(drawChart)); }
-  updatePairSelector(s.portfolio, s.log);
+  try { updatePairSelector(s.portfolio, s.log); } catch(e) {}
 
   // Mercado
   const regime = s.marketRegime||"UNKNOWN";
@@ -869,7 +875,10 @@ function render() {
   const periodOpsCount = currentPeriod==="ALL" ? (s.log||[]).filter(l=>l.type==="SELL").length : periodSells.length;
   document.getElementById("daily-ops").textContent = periodSells.length+" operaciones";
   const limitSuffix = currentPeriod==="1D"||currentPeriod==="1H"?"hoy":periodLabel;
-  document.getElementById("daily-limit").textContent = "máx. "+(s.dailyLimit||50)+" "+limitSuffix;
+  const _limitVal = s.dailyLimit||50;
+  document.getElementById("daily-limit").textContent = currentPeriod==="1D"||currentPeriod==="1H"
+    ? "máx. "+_limitVal+" hoy"
+    : "máx. "+_limitVal+"/día";
 
   const cb = s.circuitBreaker;
   const cbEl = document.getElementById("cb-status");
