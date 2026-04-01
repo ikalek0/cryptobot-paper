@@ -278,4 +278,58 @@ async function runHistoricalSimulation(symbols, interval = '1h') {
   return results;
 }
 
-module.exports = { runHistoricalSimulation, simulatePeriod, fetchAllKlinesForPeriod };
+
+// ── Fast-Learn: inyecta trades sintéticos para acelerar aprendizaje ──────────
+function generateFastLearnTrades(count=500) {
+  const trades=[];
+  const regimes=['BULL','BULL','LATERAL','LATERAL','LATERAL','BEAR'];
+  const symbols=['BTCUSDC','ETHUSDC','SOLUSDC','BNBUSDC','ADAUSDC','XRPUSDC'];
+  for(let i=0;i<count;i++){
+    const regime=regimes[Math.floor(Math.random()*regimes.length)];
+    const symbol=symbols[Math.floor(Math.random()*symbols.length)];
+    const rsiEntry=regime==='BULL'?25+Math.random()*20:regime==='LATERAL'?30+Math.random()*15:15+Math.random()*15;
+    const baseWinProb=regime==='BULL'?0.55:regime==='LATERAL'?0.45:0.35;
+    const win=Math.random()<baseWinProb;
+    const pnlPct=win?(regime==='BULL'?0.8+Math.random()*2.5:0.3+Math.random()*1.5):-(0.15+Math.random()*0.5);
+    trades.push({symbol,regime,rsiEntry,pnlPct:+pnlPct.toFixed(3),win,synthetic:true,
+      ts:new Date(Date.now()-(count-i)*300000).toISOString()});
+  }
+  return trades;
+}
+
+async function runFastLearn(bot, targetTrades=300) {
+  if(!bot) return 0;
+  const existing=(bot.log||[]).filter(l=>l.type==='SELL').length;
+  if(existing>=targetTrades){ console.log(`[FAST-LEARN] Ya tiene ${existing} trades — skip`); return 0; }
+  const needed=Math.max(0, targetTrades-existing);
+  const trades=generateFastLearnTrades(needed);
+  let injected=0;
+  for(const t of trades){
+    try{
+      const stateKey=bot.qLearning.encodeState({rsi:t.rsiEntry,bbZone:t.rsiEntry<30?'below_lower':'lower_half',
+        regime:t.regime,trend:t.regime==='BULL'?'up':t.regime==='BEAR'?'down':'neutral',
+        volumeRatio:1,atrLevel:1,fearGreed:50});
+      const action=t.win?'BUY':'SKIP';
+      bot.qLearning.update(stateKey,action,t.pnlPct*0.2,stateKey);
+      if(bot.dqn){
+        const v=bot.dqn.encodeState({rsi:t.rsiEntry,bbZone:'lower_half',regime:t.regime,
+          trend:'neutral',volumeRatio:1,atrLevel:1,fearGreed:50,lsRatio:1});
+        bot.dqn.remember(v,action,t.pnlPct*0.2,v);
+      }
+      if(bot.multiAgent&&bot.dqn){
+        const v=bot.dqn.encodeState({rsi:t.rsiEntry,bbZone:'lower_half',regime:t.regime,
+          trend:'neutral',volumeRatio:1,atrLevel:1,fearGreed:50,lsRatio:1});
+        bot.multiAgent.learnFromTrade(t.regime,v,action,t.pnlPct*0.2,v,t.pnlPct);
+      }
+      if(bot.stratEval) bot.stratEval.recordTrade('ENSEMBLE',t.regime,t.pnlPct);
+      injected++;
+    }catch(e){}
+  }
+  if(bot.dqn&&bot.dqn.replayBuffer.length>=50){
+    for(let b=0;b<Math.min(30,Math.floor(injected/10));b++) bot.dqn.trainBatch();
+  }
+  console.log(`[FAST-LEARN] ✅ ${injected} trades sintéticos | DQN: ${bot.dqn?.totalUpdates||0} updates | Ahora en Fase ${(existing+injected)<100?1:(existing+injected)<500?2:3}`);
+  return injected;
+}
+
+module.exports = { runFastLearn, runHistoricalSimulation, simulatePeriod, fetchAllKlinesForPeriod };

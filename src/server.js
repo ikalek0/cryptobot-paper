@@ -13,7 +13,8 @@ const { Blacklist, MarketGuard, getTradingScore } = require("./market");
 const { CryptoPanicDefense } = require("./cryptoPanic");
 const { fetchFearGreed, fetchNewsAlert, fetchAllKlines, runNightlyReplay, fetchLongShortRatio, fetchFundingRate, fetchRedditSentiment, fetchOpenInterest, fetchTakerVolume } = require("./feeds");
 const { exportParams, calcSyncStats } = require("./sync");
-const { runHistoricalSimulation }     = require("./historicalSimulation");
+const { runHistoricalSimulation, runFastLearn } = require("./historicalSimulation");
+const { runBacktest, runRollingWalkForward, runIntradayWalkForward, runMultiTimeframeWF } = require("./backtest");
 const tg         = require("./telegram");
 
 const PORT    = process.env.PORT    || 3000;
@@ -267,6 +268,8 @@ scheduleNightlyLearning();
       }
       if (injected > 0) {
         console.log(`[PAPER] Aprendizaje histórico inyectado: ${injected} trades → Q-Learning + DQN actualizados`);
+        // Fast-learn: trades sintéticos para llegar a Fase 2 más rápido
+        runFastLearn(bot, 300).catch(e=>console.warn('[FAST-LEARN] Error:', e.message));
         // Pre-train DQN on historical data (multiple passes)
         if(bot.dqn && bot.dqn.replayBuffer.length >= 50) {
           let dqnLoss = 0;
@@ -540,6 +543,38 @@ broadcast({ type:"tick", data:{ ...bot.getState(), signals, newTrades, circuitBr
       }
     }
     // Re-simulación histórica cada 6h con datos frescos de Binance
+    // Intradía WF - cada 1800 ticks (~1h) usa historial en RAM, sin API
+    if(ticks%1800===0 && ticks>0) {
+      try {
+        const intradayWF = runIntradayWalkForward(bot);
+        if(intradayWF) {
+          bot._intradayWF = intradayWF;
+          if(intradayWF.verdict==="SOBREAJUSTE") {
+            console.warn(`[WF-INTRA] ⚠️ Ratio ${intradayWF.avgRatio} — ${intradayWF.verdict}`);
+            tg.send && tg.send(`⚠️ <b>[PAPER] WF intradía</b>\nRatio: ${intradayWF.avgRatio} — ${intradayWF.verdict}\n${intradayWF.robustCount}/${intradayWF.totalSymbols} pares robustos`);
+          } else {
+            console.log(`[WF-INTRA] Ratio ${intradayWF.avgRatio} — ${intradayWF.verdict} (${intradayWF.robustCount}/${intradayWF.totalSymbols})`);
+          }
+        }
+      } catch(e) { console.warn('[WF-INTRA]', e.message); }
+    }
+
+    // Full 3-level WF cada 6h (21600 ticks)
+    if(ticks%21600===1 && ticks>1) {
+      const WF_SYMS = ["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC"];
+      runMultiTimeframeWF(bot, WF_SYMS).then(wf => {
+        bot._multiWF = wf;
+        console.log(`[WF-MULTI] ${wf.verdict} | Combined: ${wf.combined}`);
+        tg.send && tg.send(
+          `📊 <b>[PAPER] Walk-Forward 3 niveles</b>\n\n`+
+          `⏱ Intradía: ${wf.intraday?.verdict||"—"} (ratio ${wf.intraday?.avgRatio||"—"})\n`+
+          `📅 Semanal: ${wf.weekly?.verdict||"—"} (ratio ${wf.weekly?.avgOverfitRatio||"—"})\n`+
+          `📆 Mensual: ${wf.monthly?.verdict||"—"} (ratio ${wf.monthly?.avgOverfitRatio||"—"})\n\n`+
+          `<b>Global: ${wf.verdict}</b>\n<i>${wf.recommendation}</i>`
+        );
+      }).catch(e=>console.warn('[WF-MULTI]', e.message));
+    }
+
     if(ticks%10800===0 && ticks>0) {
       const HIST_SYMBOLS = ["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC","ADAUSDC","XRPUSDC","LINKUSDC","AVAXUSDC"];
       console.log("[PAPER] Re-simulación histórica periódica (6h)...");

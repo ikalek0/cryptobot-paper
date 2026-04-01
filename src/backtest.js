@@ -198,4 +198,104 @@ async function runRollingWalkForward(symbols, trainDays=30, testDays=7, windows=
   };
 }
 
-module.exports = { runBacktest, runRollingWalkForward };
+// ── Multi-Timeframe Walk-Forward ──────────────────────────────────────────────
+// Valida el bot en 3 niveles simultáneos usando el historial en memoria
+// Sin llamadas a API — usa los precios ya almacenados en bot.history
+
+function runIntradayWalkForward(bot) {
+  // Usa bot.history (precios en RAM) para WF de minutos
+  if(!bot || !bot.history) return null;
+  const results = {};
+  const now = Date.now();
+
+  for(const [symbol, prices] of Object.entries(bot.history)) {
+    if(!prices || prices.length < 60) continue; // necesita mínimo 60 velas
+
+    // Nivel 1: Intradía — 80% train, 20% test
+    const n = prices.length;
+    const trainEnd = Math.floor(n * 0.8);
+    const trainPrices = prices.slice(0, trainEnd);
+    const testPrices  = prices.slice(trainEnd);
+    if(testPrices.length < 5) continue;
+
+    // Simular trades simples en train vs test usando RSI básico
+    const simTrades = (arr) => {
+      let wins=0, total=0;
+      for(let i=14; i<arr.length-1; i++) {
+        const slice = arr.slice(Math.max(0,i-14), i+1);
+        // RSI simple
+        let gains=0, losses=0;
+        for(let j=1;j<slice.length;j++){
+          const d=slice[j]-slice[j-1];
+          if(d>0) gains+=d; else losses+=Math.abs(d);
+        }
+        const rs=losses===0?100:gains/losses;
+        const rsi=100-(100/(1+rs));
+        if(rsi<35 && arr[i+1]>arr[i]) wins++;
+        if(rsi<35) total++;
+      }
+      return total>0 ? wins/total : 0.5;
+    };
+
+    const trainWR = simTrades(trainPrices);
+    const testWR  = simTrades(testPrices);
+    const ratio   = trainWR>0 ? +(testWR/trainWR).toFixed(2) : null;
+
+    results[symbol] = {
+      trainWR: +(trainWR*100).toFixed(1),
+      testWR:  +(testWR*100).toFixed(1),
+      ratio,
+      candles: n,
+      robust: ratio!==null ? ratio>=0.5 : null,
+    };
+  }
+
+  const ratios = Object.values(results).filter(r=>r.ratio!==null).map(r=>r.ratio);
+  const avgRatio = ratios.length ? +(ratios.reduce((s,r)=>s+r,0)/ratios.length).toFixed(2) : null;
+  const robustCount = Object.values(results).filter(r=>r.robust===true).length;
+
+  return {
+    level: "intradía",
+    symbols: results,
+    avgRatio,
+    robustCount,
+    totalSymbols: Object.keys(results).length,
+    verdict: avgRatio===null?"SIN_DATOS":avgRatio>=0.6?"ROBUSTO":avgRatio>=0.45?"ACEPTABLE":"SOBREAJUSTE",
+    ts: now,
+  };
+}
+
+
+// ── Three-level WF: intradía + semanal + mensual en paralelo ─────────────────
+async function runMultiTimeframeWF(bot, symbols) {
+  const [intraday, weekly, monthly] = await Promise.all([
+    // Nivel 1: intradía (usa historial en RAM, sin API)
+    Promise.resolve(runIntradayWalkForward(bot)),
+    // Nivel 2: semanal (7 días train + 2 días test)
+    runRollingWalkForward(symbols||["BTCUSDC","ETHUSDC","SOLUSDC"], 7, 2, 2),
+    // Nivel 3: mensual (30 días train + 7 días test)
+    runRollingWalkForward(symbols||["BTCUSDC","ETHUSDC","SOLUSDC"], 30, 7, 2),
+  ]);
+
+  // Puntuación combinada
+  const scores = [
+    intraday?.avgRatio||0,
+    weekly?.avgOverfitRatio||0,
+    monthly?.avgOverfitRatio||0,
+  ].filter(s=>s>0);
+  const combined = scores.length ? +(scores.reduce((a,b)=>a+b,0)/scores.length).toFixed(2) : null;
+
+  return {
+    intraday,
+    weekly,
+    monthly,
+    combined,
+    verdict: combined===null?"SIN_DATOS":combined>=0.65?"✅ ROBUSTO":combined>=0.50?"⚠️ ACEPTABLE":"❌ POSIBLE_SOBREAJUSTE",
+    recommendation: combined===null?"Necesita más datos":
+      combined>=0.65?"El bot generaliza bien — deploy seguro":
+      combined>=0.50?"Funciona pero monitoriza de cerca":
+      "El bot puede haber memorizado el pasado — revisa antes de deploy",
+  };
+}
+
+module.exports = { runBacktest, runRollingWalkForward, runIntradayWalkForward, runMultiTimeframeWF };

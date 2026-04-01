@@ -957,6 +957,8 @@ class CryptoBotFinal {
         replayBuffer:(this.qLearning._replayBuffer||[]).length,
       },
       dqnStats:this.dqn?.getStats()||null,
+      walkForwardIntra:this._intradayWF||null,
+      walkForwardMulti:this._multiWF||null,
       multiAgentStats:this.multiAgent?.getAllStats()||null,
       stratEvalStats:this.stratEval?.getStats()||null,
       dqnStats:this.dqn.getStats(),
