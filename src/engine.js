@@ -496,6 +496,18 @@ class CryptoBotFinal {
       this.portfolio[symbol].trailingStop=+ts.stopPrice.toFixed(4);
       this.portfolio[symbol].trailingHigh=+ts.maxHigh.toFixed(4);
       this.portfolio[symbol].profitLocked=+ts.profitLocked.toFixed(2);
+      // Micro-reward: el DQN aprende en cada tick, no solo al cerrar
+      if(this.dqn && pos.dqnState && this.tick % 10 === 0) {
+        const tickPnl = (cp - pos.entryPrice) / pos.entryPrice;
+        // Reward proporcional al P&L no realizado, escalado suavemente
+        const microReward = Math.max(-0.3, Math.min(0.3, tickPnl * 5));
+        // Si va bien → refuerza positivamente el BUY; si va mal → refuerza SKIP
+        this.dqn.remember(pos.dqnState, "BUY", microReward, pos.dqnState, false);
+        // Train con estos micro-rewards cada 50 ticks de posición abierta
+        if(this.tick % 50 === 0 && this.dqn.replayBuffer.length > this.dqn.minReplaySize) {
+          this.dqn.trainBatch();
+        }
+      }
       const sig=signals.find(s=>s.symbol===symbol);
       // MR exit: en LATERAL tomar beneficio en BB 65% (no esperar 90%)
       // Esto mejora WR aunque reduce tamaño de ganancia individual

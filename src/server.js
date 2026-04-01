@@ -11,9 +11,11 @@ const { CryptoBotFinal, PAIRS }       = require("./engine");
 const { saveState, loadState, deleteState } = require("./database");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
 const { CryptoPanicDefense } = require("./cryptoPanic");
-const { fetchFearGreed, fetchNewsAlert, fetchAllKlines, runNightlyReplay, fetchLongShortRatio, fetchFundingRate, fetchRedditSentiment, fetchOpenInterest, fetchTakerVolume } = require("./feeds");
+const { fetchFearGreed, calcRealtimeFearGreed, fgCalibrator, fetchNewsAlert, fetchAllKlines, runNightlyReplay, fetchLongShortRatio, fetchFundingRate, fetchRedditSentiment, fetchOpenInterest, fetchTakerVolume } = require("./feeds");
 const { exportParams, calcSyncStats } = require("./sync");
 const { runHistoricalSimulation, runFastLearn } = require("./historicalSimulation");
+const { DarwinSimulation } = require("./darwin");
+const darwin = new DarwinSimulation();
 const { runBacktest, runRollingWalkForward, runIntradayWalkForward, runMultiTimeframeWF } = require("./backtest");
 const tg         = require("./telegram");
 
@@ -135,6 +137,7 @@ let tgControls = null; // control remoto Telegram
 (async () => {
   const saved = await loadState();
   bot = new CryptoBotFinal(saved);
+  if(saved?.fgCalibratorData) { fgCalibrator.restore(saved.fgCalibratorData); console.log(`[FG-CAL] Restaurado: ${fgCalibrator.observations.length} obs, RMSE=${fgCalibrator.rmse||"—"}`); }
   bot.mode = "PAPER";
 
   // En paper sin límite de operaciones — aprender lo máximo posible
@@ -473,6 +476,21 @@ function startLoop() {
     if(optimizerResult?.changes?.length>0) tg.notifyOptimizer(optimizerResult);
 
     // Fear & Greed cada 30min (alternative.me publica 1x/día, pero puede actualizarse)
+    // Real-time F&G — actualizar en cada tick (fusiona sintético + oficial)
+    if(bot && bot.history) {
+      const rtFG = calcRealtimeFearGreed(bot, {
+        longShortRatio: bot.longShortRatio,
+        fundingRate: bot.fundingRate,
+        openInterest: bot.openInterest,
+        redditSentiment: bot.redditSentiment,
+        officialFearGreed: bot._officialFearGreed || bot.fearGreed,
+      });
+      bot.fearGreedRealtime = rtFG;
+      // Usar el valor fusionado para las decisiones
+      bot.fearGreed = rtFG.value;
+      bot.fearGreedSource = rtFG.source;
+    }
+
     if(Date.now()-lastFearGreedCheck>1800000){
       lastFearGreedCheck=Date.now();
       fetchFearGreed().then(fg=>{ bot.fearGreed=fg.value; bot.fearGreedPublished=fg.publishedAt; bot.fearGreedSource=fg.source||"unknown"; console.log(`[F&G] ${fg.value} (${fg.source||"?"}) · ${fg.publishedAt?.slice(0,16)||"?"}`); });
@@ -564,6 +582,20 @@ broadcast({ type:"tick", data:{ ...bot.getState(), signals, newTrades, circuitBr
     }
 
     // Full 3-level WF cada 6h (21600 ticks)
+    // Darwin simulation + transfer learning cada 6h
+    if(ticks%10800===2 && ticks>2) {
+      darwin.run(bot).then(results => {
+        if(results) {
+          darwin.applyWinner(bot);
+          tg.send && tg.send(
+            `🧬 <b>[PAPER] Darwin — ${darwin.winner?.profile} gana</b>\n`+
+            results.map(r=>`${r.profile===darwin.winner?.profile?"🏆":"  "} ${r.profile}: WR ${r.wr}% ret ${r.returnPct}% (${r.trades} ops)`).join("\n")
+          );
+        }
+      }).catch(e=>console.warn("[DARWIN]", e.message));
+      sendTransferLearning();
+    }
+
     if(ticks%21600===1 && ticks>1) {
       const WF_SYMS = ["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC"];
       runMultiTimeframeWF(bot, WF_SYMS).then(wf => {

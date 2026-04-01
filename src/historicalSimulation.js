@@ -280,29 +280,55 @@ async function runHistoricalSimulation(symbols, interval = '1h') {
 
 
 // ── Fast-Learn: inyecta trades sintéticos para acelerar aprendizaje ──────────
-function generateFastLearnTrades(count=500) {
+function generateFastLearnTrades(count=500, marketContext={}) {
+  const fg = marketContext.fearGreed||50;
+  const regime = marketContext.regime||"LATERAL";
+  const lsRatio = marketContext.lsRatio||1.0;
+  // Win probabilities calibrated to current market
+  const winProbs = {
+    BULL:    fg>60?0.60:fg>40?0.52:0.48,
+    LATERAL: fg<20?0.48:fg<40?0.44:0.40,
+    BEAR:    fg<15?0.42:fg<25?0.36:0.30,
+  };
+  // Regime distribution weighted to current regime
+  const regimeDist = regime==="BULL"
+    ? ["BULL","BULL","BULL","LATERAL","LATERAL","BEAR"]
+    : regime==="BEAR"
+    ? ["BEAR","BEAR","LATERAL","LATERAL","BULL","BEAR"]
+    : ["LATERAL","LATERAL","LATERAL","BEAR","BULL","LATERAL"];
+  const symbols=["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC","ADAUSDC","XRPUSDC","LINKUSDC","BNBUSDC"];
   const trades=[];
-  const regimes=['BULL','BULL','LATERAL','LATERAL','LATERAL','BEAR'];
-  const symbols=['BTCUSDC','ETHUSDC','SOLUSDC','BNBUSDC','ADAUSDC','XRPUSDC'];
   for(let i=0;i<count;i++){
-    const regime=regimes[Math.floor(Math.random()*regimes.length)];
+    const tradeRegime=regimeDist[Math.floor(Math.random()*regimeDist.length)];
     const symbol=symbols[Math.floor(Math.random()*symbols.length)];
-    const rsiEntry=regime==='BULL'?25+Math.random()*20:regime==='LATERAL'?30+Math.random()*15:15+Math.random()*15;
-    const baseWinProb=regime==='BULL'?0.55:regime==='LATERAL'?0.45:0.35;
-    const win=Math.random()<baseWinProb;
-    const pnlPct=win?(regime==='BULL'?0.8+Math.random()*2.5:0.3+Math.random()*1.5):-(0.15+Math.random()*0.5);
-    trades.push({symbol,regime,rsiEntry,pnlPct:+pnlPct.toFixed(3),win,synthetic:true,
+    const rsiBase=tradeRegime==="BULL"?28:tradeRegime==="BEAR"?18:32;
+    const rsiEntry=rsiBase+Math.random()*15;
+    const lsAdj=lsRatio>2?-0.05:lsRatio<0.8?+0.05:0;
+    const win=Math.random()<((winProbs[tradeRegime]||0.44)+lsAdj);
+    const pnlPct=win
+      ?(tradeRegime==="BULL"?0.7+Math.random()*2.0:0.25+Math.random()*1.2)
+      :-(0.12+Math.random()*0.45);
+    trades.push({symbol,regime:tradeRegime,rsiEntry:+rsiEntry.toFixed(1),
+      pnlPct:+pnlPct.toFixed(3),win,synthetic:true,
+      fg:Math.round(fg+(Math.random()-0.5)*10),
       ts:new Date(Date.now()-(count-i)*300000).toISOString()});
   }
   return trades;
 }
 
-async function runFastLearn(bot, targetTrades=300) {
+async function runFastLearn(bot, targetTrades=2000) {
+  // Obtener contexto de mercado actual para calibrar los sintéticos
+  const marketContext = {
+    fearGreed: bot.fearGreed || 50,
+    regime: bot.marketRegime || "LATERAL",
+    lsRatio: bot.longShortRatio?.ratio || 1.0,
+  };
+  console.log(`[FAST-LEARN] Contexto: F&G=${marketContext.fearGreed} régimen=${marketContext.regime} L/S=${marketContext.lsRatio}`);
   if(!bot) return 0;
   const existing=(bot.log||[]).filter(l=>l.type==='SELL').length;
   if(existing>=targetTrades){ console.log(`[FAST-LEARN] Ya tiene ${existing} trades — skip`); return 0; }
   const needed=Math.max(0, targetTrades-existing);
-  const trades=generateFastLearnTrades(needed);
+  const trades=generateFastLearnTrades(needed, marketContext);
   let injected=0;
   for(const t of trades){
     try{

@@ -379,6 +379,191 @@ async function fetchTakerVolume(symbol="BTCUSDT") {
   });
 }
 
-module.exports={fetchFearGreed,fetchNewsAlert,fetchAllKlines,runNightlyReplay,
+
+
+// ── F&G Calibration: aprende a ajustar el sintético vs el oficial ─────────────
+// Cada vez que llega un F&G oficial, guarda el par (sintético, oficial)
+// Con 10+ observaciones, ajusta los pesos del modelo sintético via regresión simple
+
+class FearGreedCalibrator {
+  constructor() {
+    this.observations = []; // [{synthetic, official, ts, scores}]
+    this.maxObs = 90;       // 90 días máximo
+    // Pesos iniciales por componente (suman 1.0)
+    this.weights = {
+      momentum:  0.30,
+      trend:     0.20,
+      sentiment: 0.20,
+      funding:   0.15,
+      oi:        0.10,
+      social:    0.05,
+    };
+    this.officialBlend = 0.60; // cuánto peso al oficial vs sintético
+    this.calibrated = false;
+    this.lastCalibration = null;
+    this.rmse = null; // error cuadrático medio del modelo
+  }
+
+  // Registrar observación cuando llega el F&G oficial
+  recordObservation(syntheticScores, syntheticValue, officialValue) {
+    this.observations.push({
+      synthetic: syntheticValue,
+      official: officialValue,
+      scores: {...syntheticScores},
+      ts: Date.now(),
+    });
+    // Mantener solo últimos 90 días
+    if(this.observations.length > this.maxObs) this.observations.shift();
+    // Recalibrar si tenemos suficientes datos
+    if(this.observations.length >= 10) this.calibrate();
+  }
+
+  // Regresión lineal simple por componente
+  // Minimiza MSE entre weighted_sum(scores) y official
+  calibrate() {
+    const obs = this.observations;
+    const components = Object.keys(this.weights);
+
+    // Calcular el error actual con los pesos actuales
+    const errors = obs.map(o => {
+      const predicted = components.reduce((s, k) => s + (o.scores[k]||50) * this.weights[k], 0);
+      return o.official - predicted;
+    });
+    const currentRMSE = Math.sqrt(errors.reduce((s, e) => s + e*e, 0) / errors.length);
+
+    // Ajuste de pesos por gradiente descendente simple
+    const lr = 0.001; // learning rate muy pequeño para estabilidad
+    const newWeights = {...this.weights};
+
+    for(const comp of components) {
+      // Gradiente del error respecto al peso del componente
+      let gradient = 0;
+      for(const o of obs) {
+        const predicted = components.reduce((s, k) => s + (o.scores[k]||50) * newWeights[k], 0);
+        const err = o.official - predicted;
+        gradient += -2 * err * (o.scores[comp]||50);
+      }
+      gradient /= obs.length;
+      newWeights[comp] = Math.max(0.02, Math.min(0.60, newWeights[comp] - lr * gradient));
+    }
+
+    // Renormalizar para que sumen 1.0
+    const total = Object.values(newWeights).reduce((s, v) => s + v, 0);
+    for(const k of components) newWeights[k] = +(newWeights[k] / total).toFixed(4);
+
+    // Calcular nuevo RMSE con pesos ajustados
+    const newErrors = obs.map(o => {
+      const predicted = components.reduce((s, k) => s + (o.scores[k]||50) * newWeights[k], 0);
+      return o.official - predicted;
+    });
+    const newRMSE = Math.sqrt(newErrors.reduce((s, e) => s + e*e, 0) / newErrors.length);
+
+    // Solo adoptar si mejoró
+    if(newRMSE < currentRMSE) {
+      this.weights = newWeights;
+      this.rmse = +newRMSE.toFixed(2);
+      console.log(`[FG-CAL] ✅ Pesos ajustados — RMSE: ${currentRMSE.toFixed(2)}→${newRMSE.toFixed(2)} con ${obs.length} obs`);
+    } else {
+      this.rmse = +currentRMSE.toFixed(2);
+    }
+
+    // Ajustar cuánto confiar en oficial vs sintético según error
+    // Si el error es bajo → más confianza en el sintético (blend más equilibrado)
+    this.officialBlend = newRMSE < 5 ? 0.45 : newRMSE < 10 ? 0.55 : 0.65;
+    this.calibrated = true;
+    this.lastCalibration = new Date().toISOString();
+  }
+
+  getStats() {
+    return {
+      observations: this.observations.length,
+      weights: this.weights,
+      officialBlend: this.officialBlend,
+      rmse: this.rmse,
+      calibrated: this.calibrated,
+      lastCalibration: this.lastCalibration,
+    };
+  }
+
+  serialize() {
+    return { observations: this.observations, weights: this.weights, officialBlend: this.officialBlend };
+  }
+
+  restore(data) {
+    if(data?.observations) this.observations = data.observations;
+    if(data?.weights) this.weights = data.weights;
+    if(data?.officialBlend) this.officialBlend = data.officialBlend;
+    if(this.observations.length >= 10) this.calibrate();
+  }
+}
+
+// Singleton calibrador
+const fgCalibrator = new FearGreedCalibrator();
+
+// Versión mejorada de calcRealtimeFearGreed que usa el calibrador
+function calcRealtimeFearGreed(bot, state = {}) {
+  const scores = {};
+
+  // 1. BTC momentum
+  const btcHistory = bot.history?.["BTCUSDC"] || bot.history?.["BTCUSDT"] || [];
+  if(btcHistory.length >= 2) {
+    const last = btcHistory[btcHistory.length - 1];
+    const shortStart = btcHistory[Math.max(0, btcHistory.length - 12)];
+    const shortChange = ((last - shortStart) / shortStart) * 100;
+    const longStart = btcHistory[Math.max(0, btcHistory.length - 100)];
+    const longChange = ((last - longStart) / longStart) * 100;
+    scores.momentum = Math.min(100, Math.max(0, 50 + shortChange * 8 * 0.4 + longChange * 6 * 0.6));
+  } else { scores.momentum = 50; }
+
+  // 2. BTC vs MA50
+  if(btcHistory.length >= 50) {
+    const ma50 = btcHistory.slice(-50).reduce((s, v) => s + v, 0) / 50;
+    const pctAboveMA = ((btcHistory[btcHistory.length-1] - ma50) / ma50) * 100;
+    scores.trend = Math.min(100, Math.max(0, 50 + pctAboveMA * 5));
+  } else { scores.trend = 50; }
+
+  // 3. Long/Short ratio
+  if(state.longShortRatio?.ratio) {
+    const ls = parseFloat(state.longShortRatio.ratio);
+    scores.sentiment = Math.min(100, Math.max(0, (ls / 2.5) * 100));
+  } else { scores.sentiment = 50; }
+
+  // 4. Funding rate
+  if(state.fundingRate?.rate != null) {
+    scores.funding = Math.min(100, Math.max(0, 50 + parseFloat(state.fundingRate.rate) * 400));
+  } else { scores.funding = 50; }
+
+  // 5. Open Interest
+  const oiMap = { "GROWING": 70, "STABLE": 50, "DECLINING": 30 };
+  scores.oi = state.openInterest?.trend ? (oiMap[state.openInterest.trend] || 50) : 50;
+
+  // 6. Reddit
+  scores.social = state.redditSentiment?.score ?? 50;
+
+  // Usar pesos calibrados (o defaults si no hay calibración)
+  const weights = fgCalibrator.weights;
+  const components = Object.keys(weights);
+  const totalW = components.reduce((s, k) => s + weights[k], 0);
+  let syntheticFG = Math.round(
+    components.reduce((s, k) => s + (scores[k]||50) * weights[k], 0) / (totalW||1)
+  );
+  syntheticFG = Math.min(100, Math.max(0, syntheticFG));
+
+  // Fusionar con oficial usando blend calibrado
+  const officialFG = state.officialFearGreed || bot.fearGreed || null;
+  const blend = fgCalibrator.officialBlend;
+  const finalFG = officialFG != null
+    ? Math.min(100, Math.max(0, Math.round(officialFG * blend + syntheticFG * (1-blend))))
+    : syntheticFG;
+
+  const label = finalFG<15?"😱 Pánico extremo":finalFG<25?"😨 Miedo extremo":finalFG<40?"😟 Miedo":finalFG<55?"😐 Neutral":finalFG<70?"🙂 Codicia":finalFG<85?"😏 Codicia alta":"🤑 Euforia";
+
+  return { value:finalFG, synthetic:syntheticFG, official:officialFG, scores, blend, source:officialFG!=null?"realtime+official":"realtime", label, calibration:fgCalibrator.getStats(), updatedAt:new Date().toISOString() };
+}
+
+module.exports.calcRealtimeFearGreed = calcRealtimeFearGreed;
+module.exports.fgCalibrator = fgCalibrator;
+
+module.exports={calcRealtimeFearGreed,fetchFearGreed,fetchNewsAlert,fetchAllKlines,runNightlyReplay,
   fetchLongShortRatio,fetchFundingRate,fetchRedditSentiment,
   fetchOpenInterest,fetchTakerVolume};
