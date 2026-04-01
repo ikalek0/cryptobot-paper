@@ -803,6 +803,7 @@ class CryptoBotFinal {
           return (scoreB*momB*corrB)-(scoreA*momA*corrA);
         }).slice(0,maxPos-nOpen);
 
+        let mtfBoost = 1.0; // default, overridden inside loop
         for(const sig of buyable){
           const price=this.prices[sig.symbol];if(!price)continue;
 
@@ -963,6 +964,12 @@ class CryptoBotFinal {
           } : null;
           // Adaptive Kelly: ajustar por correlación real del portfolio
           const _adaptiveKellyMult = calcAdaptiveKelly(1.0, this.portfolio, this.prices, this.history);
+          // Multi-timeframe boost: 1h trend alignment with 5m signal
+          const _mtf5 = this.tfHistory[sig.symbol]?.price5m || null;
+          const _mtf1h = this.history[sig.symbol]?.slice(-6)?.reduce((s,p)=>s+p,0)/6 || null;
+          mtfBoost = (_mtf5 && _mtf1h && sig.signal==="BUY")
+            ? (_mtf5 > _mtf1h ? 1.1 : 0.9)  // 5m above 1h avg = aligned trend
+            : 1.0;
           const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen,kellyData)*this.hourMultiplier*fearAdj*corrMult*volBoost*pmBoost*streakMult*qConfidence*volGate*obBoost*lsGuard*redditMult*mentionBoost*dqnBoost*onChainBoost*shortSqueezeBoost*_adaptiveKellyMult*mtfBoost;
           if(invest<10||invest>availCash)continue;
           const qty=invest*(1-fee)/price,atrV=atr(h,14);
