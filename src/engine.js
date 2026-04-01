@@ -546,7 +546,9 @@ class CryptoBotFinal {
       // Esto mejora WR aunque reduce tamaño de ganancia individual
       // Scalp: salir rápido cuando hay beneficio
       const isScalp = pos.strategy === "SCALP";
-      const scalpExit = isScalp && cp >= pos.entryPrice * 1.004; // +0.4% → salir
+      // In LATERAL: higher SCALP target to avoid noise scratches
+        const scalpTarget = this.marketRegime==="LATERAL" ? 1.008 : this.marketRegime==="BEAR" ? 1.006 : 1.004;
+        const scalpExit = isScalp && cp >= pos.entryPrice * scalpTarget;
 
       // Partial exit: punto óptimo aprendido por par/régimen (default +1.5%)
       const _partialPct = this.adaptiveStop
@@ -728,12 +730,22 @@ class CryptoBotFinal {
         // Si WR muy bajo, exigir señales más fuertes para aprender qué funciona
         const baseMin = learningPhase === 1 ? 20 : learningPhase === 2 ? 35 : (this.marketRegime==="BEAR"?55:45);
         const regimeMin = isStruggling ? Math.min(baseMin + 15, 65) : baseMin;
-        const fearAdj=this.fearGreed<25?1.2:this.fearGreed>80?0.6:1.0;
+        // In LATERAL: extreme fear = mean reversion opportunity
+        const fearAdj = this.marketRegime==="LATERAL"
+          ? (this.fearGreed<25?1.3:this.fearGreed<35?1.1:this.fearGreed>75?0.8:1.0)
+          : (this.fearGreed<25?1.2:this.fearGreed>80?0.6:1.0);
         const groupCount={};
         Object.keys(this.portfolio).forEach(sym=>{const p=PAIRS.find(p=>p.symbol===sym);if(p)groupCount[p.group]=(groupCount[p.group]||0)+1;});
 
         // Respetar pausa de Telegram
       if(this._pausedByTelegram) return {signals,newTrades,circuitBreaker:cb,optimizerResult:optResult,dailyLimit:paperDailyLimit||dailyLimit,dailyUsed:this.dailyTrades.count,drawdownAlert};
+      // In LATERAL: penalize SCALP (prefer mean reversion), boost MR signals
+      if(this.marketRegime==="LATERAL" || this.marketRegime==="BEAR") {
+        signals.forEach(s=>{
+          if(s.strategy==="SCALP") s.score = Math.round(s.score*0.75); // SCALP less relevant in sideways
+          if(s.strategy==="MR" || s.strategy==="MEAN_REVERSION") s.score = Math.min(99,Math.round(s.score*1.15)); // MR preferred
+        });
+      }
       const buyable=signals.filter(s=>{
           if(s.signal!=="BUY"||s.score<regimeMin)return false;
           if(this.portfolio[s.symbol])return false;
