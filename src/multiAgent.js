@@ -173,4 +173,34 @@ class MultiAgentSystem {
   }
 }
 
+
+// ── Methods needed by live engine ─────────────────────────────────────────────
+MultiAgentSystem.prototype.getSignalBoost = function(symbol, regime, score) {
+  const agent = this.agents[regime] || this.agents["UNKNOWN"];
+  if(!agent) return 1.0;
+  // Boost based on how well this agent has performed in this regime
+  const stats = agent.getStats ? agent.getStats() : null;
+  if(!stats || stats.totalTrades < 10) return 1.0;
+  const wr = stats.winRate || 0.5;
+  // 0.8x if performing badly, 1.0x neutral, 1.2x if performing well
+  return Math.max(0.7, Math.min(1.3, 0.8 + wr * 0.8));
+};
+
+MultiAgentSystem.prototype.serialize = function() {
+  const data = {};
+  for(const [regime, agent] of Object.entries(this.agents)) {
+    data[regime] = agent.serialize ? agent.serialize() : null;
+  }
+  return data;
+};
+
+MultiAgentSystem.prototype.restore = function(data) {
+  if(!data) return;
+  for(const [regime, agentData] of Object.entries(data)) {
+    if(this.agents[regime] && agentData && this.agents[regime].restore) {
+      this.agents[regime].restore(agentData);
+    }
+  }
+};
+
 module.exports = { MultiAgentSystem, RegimeAgent };
