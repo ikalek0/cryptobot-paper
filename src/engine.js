@@ -8,6 +8,7 @@ const { MultiAgentSystem }   = require("./multiAgent");
 const { StrategyEvaluator } = require("./strategyEvaluator");
 const { RiskLearning }     = require("./riskLearning");
 const { CorrelationManager } = require("./correlationManager");
+const { AdaptiveStopLoss, AdaptiveHours, NewsImpactLearner, AdaptiveRegimeDetector, calcAdaptiveLR, calcAdaptiveKelly } = require("./adaptive_learning");
 const { QLearning, EnsembleVoter } = require("./qlearning");
 const { IntradayTrend }    = require("./intradayTrend");
 const { analyzeCounterfactual, CounterfactualMemory } = require("./counterfactual");
@@ -365,6 +366,10 @@ class CryptoBotFinal {
     this.intradayTrend  = new IntradayTrend();
     this.riskLearning   = new RiskLearning();
     this.corrManager    = new CorrelationManager();
+    this.adaptiveStop   = new AdaptiveStopLoss();
+    this.adaptiveHours  = new AdaptiveHours();
+    this.newsLearner    = new NewsImpactLearner();
+    this.regimeDetector = new AdaptiveRegimeDetector();
     this.historicalResults = null;
     if(saved){
       this.prices=saved.prices||{};this.history=saved.history||{};this.portfolio=saved.portfolio||{};
@@ -379,6 +384,10 @@ class CryptoBotFinal {
       if(saved.optimizerHistory)this.optimizer.history=saved.optimizerHistory;
       if(saved.optimizerParams)Object.assign(this.optimizer.params,saved.optimizerParams);
       if(saved.trailingHighs)this.trailing.highs=saved.trailingHighs;
+      if(saved.adaptiveStop)   this.adaptiveStop.restore(saved.adaptiveStop);
+      if(saved.adaptiveHours)  this.adaptiveHours.restore(saved.adaptiveHours);
+      if(saved.newsLearner)    this.newsLearner.restore(saved.newsLearner);
+      if(saved.regimeDetector) this.regimeDetector.restore(saved.regimeDetector);
       // Restaurar módulos de aprendizaje
       if(saved.learningData){
         this.patternMemory.loadJSON(saved.learningData.patternMemory);
@@ -413,6 +422,30 @@ class CryptoBotFinal {
   updatePrice(sym,price){
     const prevPrice = this.prices[sym] || price;
     this.prices[sym]=price;
+    // Multi-timeframe aggregation: build 5m and 1h candles from 2s ticks
+    if(!this._mtfBuf) this._mtfBuf = {};
+    if(!this._mtfBuf[sym]) this._mtfBuf[sym] = {ticks5m:[], ticks1h:[]};
+    const buf = this._mtfBuf[sym];
+    buf.ticks5m.push(price);
+    buf.ticks1h.push(price);
+    // 5m candle: every 150 ticks (150 × 2s = 5min)
+    if(buf.ticks5m.length >= 150) {
+      if(!this.history5m) this.history5m = {};
+      if(!this.history5m[sym]) this.history5m[sym] = [];
+      const close5m = buf.ticks5m[buf.ticks5m.length-1];
+      this.history5m[sym].push(close5m);
+      if(this.history5m[sym].length > 300) this.history5m[sym].shift(); // 25h
+      buf.ticks5m = [];
+    }
+    // 1h candle: every 1800 ticks (1800 × 2s = 1h)
+    if(buf.ticks1h.length >= 1800) {
+      if(!this.history1h) this.history1h = {};
+      if(!this.history1h[sym]) this.history1h[sym] = [];
+      const close1h = buf.ticks1h[buf.ticks1h.length-1];
+      this.history1h[sym].push(close1h);
+      if(this.history1h[sym].length > 168) this.history1h[sym].shift(); // 1 semana
+      buf.ticks1h = [];
+    }
     // Volume proxy: track magnitude of price changes
     if(!this.volumeHistory) this.volumeHistory={};
     if(!this.volumeHistory[sym]) this.volumeHistory[sym]=[];
@@ -515,8 +548,11 @@ class CryptoBotFinal {
       const isScalp = pos.strategy === "SCALP";
       const scalpExit = isScalp && cp >= pos.entryPrice * 1.004; // +0.4% → salir
 
-      // Partial exit: cerrar 50% en +1.5% si no hay stop ni target aún
-      if (!isScalp && !pos.partialDone && cp >= pos.entryPrice * 1.015) {
+      // Partial exit: punto óptimo aprendido por par/régimen (default +1.5%)
+      const _partialPct = this.adaptiveStop
+        ? Math.max(1.005, Math.min(1.04, 1 + (this.adaptiveStop.getStop(symbol, this.marketRegime, new Date().getUTCHours(), 0.015) * 0.5)))
+        : 1.015; // fallback 1.5%
+      if (!isScalp && !pos.partialDone && cp >= pos.entryPrice * _partialPct) {
         const partialQty = pos.qty * 0.5;
         const proceeds = partialQty * cp * (1 - fee);
         this.cash += proceeds;
@@ -665,6 +701,17 @@ class CryptoBotFinal {
         newTrades.push(trade);this.dailyTrades.count++;
         this.optimizer.recordTrade(pnl,reason);updatePairScore(this.pairScores,symbol,pnl);
         this.stratEval.recordTrade(pos.strategy, this.marketRegime, pnl);
+        // ── Autoaprendizaje adaptativo en cada SELL ───────────────────────
+        const _eh = pos.ts ? new Date(pos.ts).getUTCHours() : new Date().getUTCHours();
+        const _tr = {symbol,pnl,reason,strategy:pos.strategy||"ENSEMBLE",ts:new Date().toISOString()};
+        if(this.adaptiveStop)  this.adaptiveStop.recordTrade(_tr, this.marketRegime, _eh);
+        if(this.adaptiveHours) this.adaptiveHours.recordTrade(_tr, this.marketRegime);
+        if(this.regimeDetector) this.regimeDetector.recordOutcome(pos.regime||this.marketRegime, pnl, {lsRatio:this.longShortRatio?.ratio, fg:this.fearGreed});
+        if(this.qLearning) {
+          const _s=this.log.filter(l=>l.type==="SELL");
+          const _wr=_s.length>=10?_s.slice(-20).filter(l=>l.pnl>0).length/Math.min(20,_s.length):0.5;
+          this.qLearning.lr = calcAdaptiveLR(0.1, _s.length, _wr);
+        }
         console.log(`[${this.mode}][${this.marketRegime}][SELL] ${symbol} ${reason} P&L:${pnl.toFixed(2)}% | ${this.dailyTrades.count}/${paperDailyLimit}`);
       }
     }
@@ -692,8 +739,21 @@ class CryptoBotFinal {
           if(this.portfolio[s.symbol])return false;
           if(s.isPumping)return false; // solo filtrar pumps extremos siempre
           // Cooldown corto en fase 1, normal en fase 3
-          const cooldown = learningPhase===1 ? 60*1000 : learningPhase===2 ? 10*60*1000 : 30*60*1000; // paper: cooldown mínimo para aprender más
-          const ll=this.reentryTs[s.symbol];if(ll&&Date.now()-ll<cooldown)return false;
+          const cooldown = learningPhase===1 ? 60*1000 : learningPhase===2 ? 10*60*1000 : 30*60*1000;
+          const ll=this.reentryTs[s.symbol];
+          if(ll && Date.now()-ll < cooldown) {
+            // RE-ENTRY LOGIC: si la señal es muy fuerte Y el precio recuperó, re-entrar antes
+            const timeSinceStop = Date.now() - ll;
+            const priceRecovered = this.prices[s.symbol] > (this._lastStopPrice?.[s.symbol]||0) * 1.005;
+            const signalVeryStrong = s.score >= 88;
+            const regimeBull = this.marketRegime === "BULL";
+            // Re-entrar a los 20min si señal fuerte + precio recuperó + BULL
+            if(timeSinceStop > 20*60*1000 && priceRecovered && signalVeryStrong && regimeBull) {
+              // Permitir re-entrada temprana
+            } else {
+              return false;
+            }
+          }
           // Correlation buckets: límite adaptativo según régimen
           // BULL confirmado: permite hasta 2 del mismo grupo (la correlación trabaja a favor)
           // LATERAL/BEAR: máx 1 por grupo (evita perder doble en reversión)
@@ -889,7 +949,9 @@ class CryptoBotFinal {
             avgWin:recentSells.filter(l=>l.pnl>0).reduce((s,l)=>s+l.pnl,0)/(recentSells.filter(l=>l.pnl>0).length||1),
             avgLoss:Math.abs(recentSells.filter(l=>l.pnl<0).reduce((s,l)=>s+l.pnl,0)/(recentSells.filter(l=>l.pnl<0).length||1)),
           } : null;
-          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen,kellyData)*this.hourMultiplier*fearAdj*corrMult*volBoost*pmBoost*streakMult*qConfidence*volGate*obBoost*lsGuard*redditMult*mentionBoost*dqnBoost*onChainBoost*shortSqueezeBoost;
+          // Adaptive Kelly: ajustar por correlación real del portfolio
+          const _adaptiveKellyMult = calcAdaptiveKelly(1.0, this.portfolio, this.prices, this.history);
+          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen,kellyData)*this.hourMultiplier*fearAdj*corrMult*volBoost*pmBoost*streakMult*qConfidence*volGate*obBoost*lsGuard*redditMult*mentionBoost*dqnBoost*onChainBoost*shortSqueezeBoost*_adaptiveKellyMult*mtfBoost;
           if(invest<10||invest>availCash)continue;
           const qty=invest*(1-fee)/price,atrV=atr(h,14);
           const isScalpEntry = sig.strategy === "SCALP";
@@ -898,9 +960,17 @@ class CryptoBotFinal {
             // Scalp: stop fijo 1.5%
             stopLoss = price * 0.985;
           } else {
-            // Stop dinámico ATR (igual que live)
+            // Stop dinámico ATR + autoaprendizaje adaptativo
             const dynStop = calcDynamicStop(price, atrV, this.marketRegime);
-            stopLoss = dynStop.stop;
+            const learnedPct = this.adaptiveStop
+              ? this.adaptiveStop.getStop(sig.symbol, this.marketRegime, new Date().getUTCHours(), dynStop.stopPct||0.03)
+              : (dynStop.stopPct||0.03);
+            // Hora también afecta al sizing
+            const hourMult = this.adaptiveHours
+              ? this.adaptiveHours.getHourMultiplier(sig.symbol, this.marketRegime, new Date().getUTCHours())
+              : 1.0;
+            if(hourMult !== 1.0) sig._hourMult = hourMult; // para que calcPositionSize lo use si quiere
+            stopLoss = price * (1 - learnedPct);
           }
           this.cash = Math.max(0, this.cash - invest);
           // Recalcular para siguiente trade del mismo tick

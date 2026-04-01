@@ -311,6 +311,12 @@ async function save() {
   s.optimizerHistory=bot.optimizer.history;
   s.trailingHighs=bot.trailing.highs;
   s.reentryTs=bot.reentryTs;
+  s.fgCalibratorData=fgCalibrator.serialize();
+  // Adaptive learning systems
+  if(bot.adaptiveStop)   s.adaptiveStop   = bot.adaptiveStop.serialize();
+  if(bot.adaptiveHours)  s.adaptiveHours  = bot.adaptiveHours.serialize();
+  if(bot.newsLearner)    s.newsLearner    = bot.newsLearner.serialize();
+  if(bot.regimeDetector) s.regimeDetector = bot.regimeDetector.serialize();
   await saveState(s);
 }
 process.on("SIGTERM",async()=>{await save();process.exit(0);});
