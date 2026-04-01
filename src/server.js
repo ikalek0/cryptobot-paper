@@ -403,9 +403,13 @@ let lastFearGreedCheck=0, lastNightlyReplay="";
 
 function startLoop() {
   connectBinance();
+  let _tickRunning = false;
 
   setInterval(async () => {
     if(!bot) return;
+    if(_tickRunning){ console.warn("[PAPER] Tick saltado"); return; }
+    _tickRunning = true;
+    try {
     simulatePrices();
 
     const marketState=marketGuard.update(bot.prices["BTCUSDC"]);
@@ -671,6 +675,7 @@ broadcast({ type:"tick", data:{ ...bot.getState(), signals, newTrades, circuitBr
       }
     }
     if(ticks%20===0) save().catch(e=>console.error("[SAVE]",e));
+    } catch(e){ console.error("[PAPER] Loop error:",e.message); } finally { _tickRunning=false; }
 
   }, TICK_MS);
 
