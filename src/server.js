@@ -343,7 +343,7 @@ async function save() {
   s.optimizerHistory=bot.optimizer.history;
   s.trailingHighs=bot.trailing.highs;
   s.reentryTs=bot.reentryTs;
-  s.fgCalibratorData=fgCalibrator.serialize();
+  if(fgCalibrator?.serialize) s.fgCalibratorData=fgCalibrator.serialize();
   // Adaptive learning systems
   if(bot.adaptiveStop)   s.adaptiveStop   = bot.adaptiveStop.serialize();
   if(bot.adaptiveHours)  s.adaptiveHours  = bot.adaptiveHours.serialize();
