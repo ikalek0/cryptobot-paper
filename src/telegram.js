@@ -218,7 +218,52 @@ Entrenamiento: WR ${wf.trainWR}% (${wf.trainN} ops)
 Test real: WR ${wf.testWR}% (${wf.testN} ops)
 Ratio: ${wf.overfit} ${parseFloat(wf.overfit)<0.7?"⚠️ Overfitting posible":"✅ Robusto"}`);
             }
-            else if(text==="/ayuda") send(buildHelp(mode));
+            else if(text==="/situacion") {
+              const s = getState ? getState() : {};
+              if(!s||s.loading) return send("❌ Bot no iniciado aún");
+              const HR2 = "─────────────────────";
+              const tv = s.totalValue||0, cash = s.cash||0;
+              const regime = s.marketRegime||"UNKNOWN";
+              const fg = s.fearGreed||50;
+              const fgLabel = fg<25?"😱 Pánico":fg<40?"😟 Miedo":fg<60?"😐 Neutral":fg<75?"😊 Codicia":"🤑 Euforia";
+              const wr = s.recentWinRate??null;
+              const dp = s.dailyPnlPct||0, ret = s.returnPct||0;
+              const allSells = (s.log||[]).filter(l=>l.type==="SELL");
+              const todaySells = allSells.filter(l=>Date.now()-new Date(l.ts||0).getTime()<86400000);
+              const todayWins = todaySells.filter(l=>l.pnl>0).length;
+              const todayPnlAbs = todaySells.reduce((a,l)=>a+(l.pnlAbs||0),0);
+              const openPos = Object.entries(s.portfolio||{});
+              const mom = s.momentumMult||1;
+              const posLines = openPos.length
+                ? openPos.slice(0,8).map(([sym,pos])=>{
+                    const price = s.prices?.[sym]||pos.entryPrice;
+                    const pnl = ((price-pos.entryPrice)/pos.entryPrice*100);
+                    return `${pnl>0?"🟢":pnl<-1?"🔴":"🟡"} ${sym.replace("USDC","")} ${pnl>=0?"+":""}${pnl.toFixed(2)}% · ${pos.strategy||"—"}`;
+                  }).join("\n")+(openPos.length>8?`\n... y ${openPos.length-8} más`:"")
+                : "Sin posiciones abiertas";
+              const lastOps = todaySells.slice(0,5).map(t=>
+                `${t.pnl>0?"✅":t.pnl<-1?"❌":"⚠️"} ${(t.symbol||"").replace("USDC","")} ${t.pnl>=0?"+":""}${(t.pnl||0).toFixed(2)}% · ${t.reason||""}`
+              ).join("\n")||"Sin operaciones hoy";
+              const regimeEx = regime==="BULL"?"alcista — entradas más agresivas":regime==="BEAR"?"bajista — solo rebotes extremos":"lateral — mean reversion y scalps selectivos";
+              const fgEx = fg<25?"pánico extremo = oportunidad de rebote":fg<40?"miedo = bot más selectivo":fg>75?"euforia = reduciendo exposición":"neutral = parámetros estándar";
+              const momEx = mom<=0.7?"defensivo por P&L negativo":mom>=1.5?"agresivo por P&L positivo":"neutro";
+              send([
+                `📋 <b>SITUACIÓN PAPER</b>`,
+                HR2,
+                `💼 Capital: <b>$${tv.toFixed(2)}</b> (${ret>=0?"+":""}${ret.toFixed(2)}% total)`,
+                `📅 Hoy: <b>${todaySells.length} ops</b> · ${todayWins} ganadoras · WR ${wr!=null?wr+"%":"—"} · P&L ${dp>=0?"+":""}${dp.toFixed(2)}%`,
+                `💰 Abs hoy: ${todayPnlAbs>=0?"+":""}$${Math.abs(todayPnlAbs).toFixed(2)} | Efectivo: $${cash.toFixed(2)}`,
+                HR2,
+                `🌡️ Régimen: <b>${regime}</b> | F&G: <b>${fg} ${fgLabel}</b>`,
+                HR2,
+                `📂 Posiciones (${openPos.length}):\n${posLines}`,
+                HR2,
+                `🔄 Últimas ops hoy:\n${lastOps}`,
+                HR2,
+                `🧠 Contexto: Régimen ${regimeEx}. Sentimiento: ${fgEx}. Momentum: ${momEx}.`,
+              ].join("\n"));
+            }
+                        else if(text==="/ayuda") send(buildHelp(mode));
           }
         } catch(e){}
         setTimeout(poll,1000);
