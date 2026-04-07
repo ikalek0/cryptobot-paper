@@ -8,6 +8,8 @@ const http       = require("http");
 const path       = require("path");
 const { WebSocketServer, WebSocket } = require("ws");
 const { CryptoBotFinal, PAIRS }       = require("./engine");
+const { ensureTradeLogTable } = require("./trade_logger");
+const { scheduleWeeklyReport, scheduleTradeAnalysisReminder } = require("./weekly_report");
 const { saveState, loadState, deleteState } = require("./database");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
 const { CryptoPanicDefense } = require("./cryptoPanic");
@@ -138,20 +140,38 @@ let bot;
 
   // ── Pre-popular candle cache con klines históricas reales (Opus 4) ──────────
   // Da al ML 6 meses de contexto antes de operar en vivo
+  // Prefill 2500 velas 1h (~104 días) por par — cubre bull/bear/lateral
   const PREFILL_SYMS = ["BTCUSDC","ETHUSDC","SOLUSDC","BNBUSDC","XRPUSDC"];
-  Promise.all(PREFILL_SYMS.map(async sym => {
-    try {
-      const klines = await fetchAllKlines([sym], "1h", 300).catch(()=>({}));
-      const data = (klines[sym] || []).slice(-300);
-      if(data.length < 10) return;
-      global.ohlcvCache[sym] = data.map(k=>({
-        open:+(k.open||k[1]), high:+(k.high||k[2]), low:+(k.low||k[3]),
-        close:+(k.close||k[4]), volume:+(k.volume||k[5]||0), ts:k.ts||k[0]
-      }));
-      global.candleCache[sym+"_1h"] = global.ohlcvCache[sym].map(c=>({...c,start:c.ts}));
-      console.log("[PAPER-HIST] "+sym+" prefill: "+data.length+" velas 1h cargadas");
-    } catch(e) { console.warn("[PAPER-HIST] prefill "+sym+":", e.message); }
-  })).then(()=>console.log("[PAPER-HIST] ✅ ML tiene "+PREFILL_SYMS.length+" pares precargados")).catch(()=>{});
+  (async () => {
+    for(const sym of PREFILL_SYMS) {
+      try {
+        // 3 requests × 1000 candles = 3000 velas (~125 días de 1h)
+        const allKlines = [];
+        let endTime = null;
+        for(let page=0; page<3; page++) {
+          let url = `https://api.binance.com/api/v3/klines?symbol=${sym}&interval=1h&limit=1000`;
+          if(endTime) url += `&endTime=${endTime}`;
+          const batch = await new Promise((res,rej)=>{
+            const https=require("https");
+            const t=setTimeout(()=>rej(new Error("timeout")),15000);
+            https.get(url,r=>{let d="";r.on("data",c=>d+=c);r.on("end",()=>{clearTimeout(t);try{res(JSON.parse(d));}catch(e){rej(e);}});}).on("error",rej);
+          });
+          if(!batch.length) break;
+          for(let i=batch.length-1;i>=0;i--) allKlines.unshift(batch[i]);
+          endTime = batch[0][0]-1;
+          await new Promise(r=>setTimeout(r,300));
+        }
+        if(allKlines.length < 10) continue;
+        global.ohlcvCache[sym] = allKlines.map(k=>({
+          open:+k[1], high:+k[2], low:+k[3], close:+k[4], volume:+k[5], ts:k[0]
+        }));
+        global.candleCache[sym+"_1h"] = global.ohlcvCache[sym].map(c=>({...c,start:c.ts}));
+        console.log("[PAPER-HIST] "+sym+": "+allKlines.length+" velas 1h (~"+Math.round(allKlines.length/24)+"d) precargadas");
+        await new Promise(r=>setTimeout(r,500));
+      } catch(e) { console.warn("[PAPER-HIST] prefill "+sym+":", e.message); }
+    }
+    console.log("[PAPER-HIST] ✅ Prefill completo — DQN tiene contexto de "+PREFILL_SYMS.length+" pares");
+  })();
 
   fetchFearGreed().then(fg => { bot.fearGreed=fg.value; });
 
@@ -311,6 +331,19 @@ function startLoop() {
       if(trade.type==="SELL") {
         if(trade.pnl<0){ const wasBl=blacklist.isBlacklisted(trade.symbol); blacklist.recordLoss(trade.symbol); if(!wasBl&&blacklist.isBlacklisted(trade.symbol)) tg.notifyBlacklist(trade.symbol); }
         else blacklist.recordWin(trade.symbol);
+        // Structured trade log → PostgreSQL
+        try {
+          const { logTrade: _lt } = require("./trade_logger");
+          _lt(client, {
+            bot:"paper", symbol:trade.symbol, strategy:trade.strategy||"DQN",
+            openTs:trade.openTs||null, closeTs:Date.now(),
+            entryPrice:trade.entryPrice||null, exitPrice:trade.price||null,
+            pnlPct:trade.pnl, reason:trade.reason||null,
+            regime:bot.marketRegime||"UNKNOWN",
+            fearGreed:bot.fearGreed||null,
+            hourUtc:new Date().getUTCHours(),
+          }).catch(()=>{});
+        } catch(e) {}
       }
     }
 
@@ -361,7 +394,10 @@ function startLoop() {
 
   }, TICK_MS);
 
-  server.listen(PORT, ()=>console.log(`\n📋 CRYPTOBOT PAPER en http://localhost:${PORT} | Capital: $${CAPITAL_USDT} USDT\n`));
+  scheduleWeeklyReport(tg, null, "paper", null);
+scheduleTradeAnalysisReminder(tg, null, "paper");
+
+server.listen(PORT, ()=>console.log(`\n📋 CRYPTOBOT PAPER en http://localhost:${PORT} | Capital: $${CAPITAL_USDT} USDT\n`));
 }
 
 wss.on("connection", ws=>{ if(bot) ws.send(JSON.stringify({type:"state",data:{...bot.getState(),instance:"PAPER"}})); });
