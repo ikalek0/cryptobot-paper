@@ -1,4 +1,4 @@
-// ─── CRYPTOBOT ENGINE v3 — ESTRATEGIA ADAPTATIVA + Q-LEARNING + ENSEMBLE ─────
+// ─── CRYPTOBOT ENGINE v3.1 — DQN 12 features, dim mismatch fix — ESTRATEGIA ADAPTATIVA + Q-LEARNING + ENSEMBLE ─────
 "use strict";
 
 const { RISK_PROFILES, CircuitBreaker, TrailingStop, calcPositionSize, AutoOptimizer } = require("./risk");
@@ -8,7 +8,7 @@ const { MultiAgentSystem }   = require("./multiAgent");
 const { StrategyEvaluator } = require("./strategyEvaluator");
 const { RiskLearning }     = require("./riskLearning");
 const { CorrelationManager } = require("./correlationManager");
-const { AdaptiveStopLoss, AdaptiveHours, NewsImpactLearner, AdaptiveRegimeDetector, calcAdaptiveLR, calcAdaptiveKelly } = require("./adaptive_learning");
+const { AdaptiveStopLoss, AdaptiveHours, NewsImpactLearner, AdaptiveRegimeDetector, calcAdaptiveLR, calcAdaptiveKelly, calcRealKelly } = require("./adaptive_learning");
 const { QLearning, EnsembleVoter } = require("./qlearning");
 const { IntradayTrend }    = require("./intradayTrend");
 const { analyzeCounterfactual, CounterfactualMemory } = require("./counterfactual");
@@ -42,7 +42,23 @@ const PAIRS = [
   { symbol:"ATOMUSDC", name:"Cosmos",    short:"ATOM", category:"L1",   group:"alt3"  },
   { symbol:"NEARUSDC", name:"NEAR",      short:"NEAR", category:"L1",   group:"alt3"  },
   { symbol:"APTUSDC",  name:"Aptos",     short:"APT",  category:"L1",   group:"alt3"  },
-];
+  // ── USDT: mejor liquidez para los mismos activos ─────────────────────────
+  { symbol:"BTCUSDT",  name:"Bitcoin",   short:"BTC",  category:"L1",   group:"major", quoteAsset:"USDT" },
+  { symbol:"ETHUSDT",  name:"Ethereum",  short:"ETH",  category:"L1",   group:"major", quoteAsset:"USDT" },
+  { symbol:"SOLUSDT",  name:"Solana",    short:"SOL",  category:"L1",   group:"alt1",  quoteAsset:"USDT" },
+  { symbol:"BNBUSDT",  name:"BNB",       short:"BNB",  category:"L1",   group:"alt1",  quoteAsset:"USDT" },
+  { symbol:"XRPUSDT",  name:"Ripple",    short:"XRP",  category:"Pago", group:"pay",   quoteAsset:"USDT" },
+  { symbol:"LINKUSDT", name:"Chainlink", short:"LINK", category:"DeFi", group:"defi",  quoteAsset:"USDT" },
+  { symbol:"ADAUSDT",  name:"Cardano",   short:"ADA",  category:"L1",   group:"alt2",  quoteAsset:"USDT" },
+  { symbol:"DOTUSDT",  name:"Polkadot",  short:"DOT",  category:"L1",   group:"alt2",  quoteAsset:"USDT" },
+  // ── Nuevos pares alto volumen solo en paper (testing) ────────────────────
+  { symbol:"SUIUSDT",  name:"Sui",       short:"SUI",  category:"L1",   group:"alt3",  quoteAsset:"USDT" },
+  { symbol:"TONUSDT",  name:"TON",       short:"TON",  category:"L1",   group:"alt3",  quoteAsset:"USDT" },
+  { symbol:"DOGEUSDT", name:"Dogecoin",  short:"DOGE", category:"Meme", group:"meme",  quoteAsset:"USDT" },
+  { symbol:"TRXUSDT",  name:"TRON",      short:"TRX",  category:"L1",   group:"alt3",  quoteAsset:"USDT" },
+]
+const PAIRS_MAP = new Map(PAIRS.map(p=>[p.symbol,p]));
+;
 
 const CATEGORIES = {
   L1:   { name:"Layer 1", color:"#f7931a", emoji:"🔶" },
@@ -393,7 +409,14 @@ class CryptoBotFinal {
         this.patternMemory.loadJSON(saved.learningData.patternMemory);
         this.cfMemory.loadJSON(saved.learningData.cfMemory);
         this.qLearning.loadJSON(saved.learningData.qLearning);
-        if(saved.learningData.dqn) this.dqn.loadJSON(saved.learningData.dqn);
+        if(saved.learningData.dqn) {
+          try {
+            this.dqn.loadJSON(saved.learningData.dqn);
+          } catch(dqnErr) {
+            console.warn("[DQN] Incompatible saved weights (dim mismatch) — resetting DQN. Reason:", dqnErr.message);
+            // Old model had different input size - start fresh with new architecture
+          }
+        }
         if(saved.learningData.multiAgent) this.multiAgent.loadJSON(saved.learningData.multiAgent);
         if(saved.learningData.stratEval) this.stratEval.loadJSON(saved.learningData.stratEval);
         this.ensemble.loadJSON(saved.learningData.ensemble);
@@ -535,7 +558,9 @@ class CryptoBotFinal {
         // Reward proporcional al P&L no realizado, escalado suavemente
         const microReward = Math.max(-0.3, Math.min(0.3, tickPnl * 5));
         // Si va bien → refuerza positivamente el BUY; si va mal → refuerza SKIP
-        this.dqn.remember(pos.dqnState, "BUY", microReward, pos.dqnState, false);
+        if(pos.dqnState && pos.dqnState.length === this.dqn.inputSize) {
+          this.dqn.remember(pos.dqnState, "BUY", microReward, pos.dqnState, false);
+        }
         // Train con estos micro-rewards cada 50 ticks de posición abierta
         if(this.tick % 50 === 0 && this.dqn.replayBuffer.length > this.dqn.minReplaySize) {
           this.dqn.trainBatch();
@@ -624,18 +649,24 @@ class CryptoBotFinal {
             + (reason==="STOP LOSS"?-0.5:0);
           const closeVec = this.dqn.encodeState({rsi:closeRsi,bbZone:closeBBZone,regime:this.marketRegime,
             trend:closeTrend.direction,volumeRatio:closeVolRatio,atrLevel:closeAtr,
-            fearGreed:this.fearGreed,lsRatio:this.longShortRatio?.ratio||1});
-          this.dqn.remember(pos.dqnState, pos.dqnAction||"BUY", dqnReward, closeVec, false);
+            fearGreed:this.fearGreed,lsRatio:this.longShortRatio?.ratio||1,
+            sessionHour:new Date(Date.now()+2*3600000).getUTCHours(),winStreak:0,btcTrend24h:0,volatilityPct:50});
+          // Validate dimensions before training (old states may have 8 inputs)
+          if(pos.dqnState && pos.dqnState.length === this.dqn.inputSize) {
+            this.dqn.remember(pos.dqnState, pos.dqnAction||"BUY", dqnReward, closeVec, false);
+          }
           // Multi-agent: el agente del régimen de entrada aprende
           if(pos.dqnState) {
-            const maLoss = this.multiAgent.learnFromTrade(
-              pos.regime||this.marketRegime, pos.dqnState,
+            // Only use dqnState if dimensions match
+          const _validDqnState = pos.dqnState && pos.dqnState.length === this.dqn.inputSize ? pos.dqnState : null;
+          const maLoss = this.multiAgent.learnFromTrade(
+              pos.regime||this.marketRegime, _validDqnState,
               pos.dqnAction||"BUY", dqnReward, closeVec, pnl
             );
           }
           // Train DQN general every 50 trades
           if(totalTrades>0 && totalTrades%50===0 && this.dqn.replayBuffer.length>=50) {
-            const loss=this.dqn.trainBatch();
+            const loss=this.dqn.trainBatch(5);
             if(totalTrades%200===0) console.log(`[DQN] Updates:${this.dqn.totalUpdates} Loss:${loss.toFixed(4)} | MA: BULL-WR:${this.multiAgent.agents.BULL?.winRate}% BEAR-WR:${this.multiAgent.agents.BEAR?.winRate}%`);
           }
           this.dqn.decayEpsilon(0.03, totalTrades);
@@ -648,14 +679,17 @@ class CryptoBotFinal {
             rsi:closeRsi, bbZone:closeBBZone, regime:this.marketRegime,
             trend:closeTrend.direction, volumeRatio:closeVolRatio,
             atrLevel:closeAtr, fearGreed:this.fearGreed,
-            lsRatio:this.longShortRatio?.ratio||1
+            lsRatio:this.longShortRatio?.ratio||1,
+            sessionHour:new Date(Date.now()+2*3600000).getUTCHours(),winStreak:0,btcTrend24h:0,volatilityPct:50
           });
           // Reward: same as Q-Learning but continuous
           const dqnReward = Math.max(-2, Math.min(2, pnl/100*20))
             + (win ? 0.3 : 0)
             + (reason==="SCALP TARGET"||reason==="MR OBJETIVO" ? 0.4 : 0)
             + (reason==="STOP LOSS" ? -0.5 : 0);
-          this.dqn.remember(pos.dqnState, "BUY", dqnReward, nextDqnState, false);
+          if(pos.dqnState && pos.dqnState.length === this.dqn.inputSize) {
+            this.dqn.remember(pos.dqnState, "BUY", dqnReward, nextDqnState, false);
+          }
 
           // Train every 50 trades
           if(totalTrades > 0 && totalTrades % 50 === 0 && this.dqn.replayBuffer.length >= 50) {
@@ -735,7 +769,7 @@ class CryptoBotFinal {
           ? (this.fearGreed<25?1.3:this.fearGreed<35?1.1:this.fearGreed>75?0.8:1.0)
           : (this.fearGreed<25?1.2:this.fearGreed>80?0.6:1.0);
         const groupCount={};
-        Object.keys(this.portfolio).forEach(sym=>{const p=PAIRS.find(p=>p.symbol===sym);if(p)groupCount[p.group]=(groupCount[p.group]||0)+1;});
+        Object.keys(this.portfolio).forEach(sym=>{const p=PAIRS_MAP.get(sym);if(p)groupCount[p.group]=(groupCount[p.group]||0)+1;});
 
         // Respetar pausa de Telegram
       if(this._pausedByTelegram) return {signals,newTrades,circuitBreaker:cb,optimizerResult:optResult,dailyLimit:paperDailyLimit||dailyLimit,dailyUsed:this.dailyTrades.count,drawdownAlert};
@@ -825,7 +859,8 @@ class CryptoBotFinal {
               rsi:rsiVal, bbZone, regime:this.marketRegime,
               trend:trendData.direction, volumeRatio:volData.ratio,
               atrLevel, fearGreed:this.fearGreed,
-              lsRatio:this.longShortRatio?.ratio||1
+              lsRatio:this.longShortRatio?.ratio||1,
+              sessionHour:new Date(Date.now()+2*3600000).getUTCHours(),winStreak:0,btcTrend24h:0,volatilityPct:50
             });
             dqnAction = this.dqn.chooseAction(dqnState);
             // Store state for later training
@@ -970,15 +1005,25 @@ class CryptoBotFinal {
           mtfBoost = (_mtf5 && _mtf1h && sig.signal==="BUY")
             ? (_mtf5 > _mtf1h ? 1.1 : 0.9)  // 5m above 1h avg = aligned trend
             : 1.0;
-          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen,kellyData)*this.hourMultiplier*fearAdj*corrMult*volBoost*pmBoost*streakMult*qConfidence*volGate*obBoost*lsGuard*redditMult*mentionBoost*dqnBoost*onChainBoost*shortSqueezeBoost*_adaptiveKellyMult*mtfBoost;
-          if(invest<10||invest>availCash)continue;
+          // Pair performance multiplier (must be before invest)
+          const _ppScore = (this.pairScores||{})[sig.symbol]||0;
+          const _pairMult = _ppScore < -3 ? 0.6 : _ppScore < -1 ? 0.8 : _ppScore > 3 ? 1.15 : 1.0;
+          const invest=calcPositionSize(availCash,sig.score,sig.atrPct,this.profile,nOpen,kellyData)*this.hourMultiplier*fearAdj*corrMult*volBoost*pmBoost*streakMult*qConfidence*volGate*obBoost*lsGuard*redditMult*mentionBoost*dqnBoost*onChainBoost*shortSqueezeBoost*_adaptiveKellyMult*_pairMult*mtfBoost;
+          if(invest<10||invest>Math.min(availCash, tv*0.15))continue; // max 15% per position
           const qty=invest*(1-fee)/price,atrV=atr(h,14);
-          const isScalpEntry = sig.strategy === "SCALP";
+          // Convert SCALP to MR for better R/R learning
+          if(sig.strategy==="SCALP") {
+            sig.strategy = "MEAN_REVERSION";
+            sig.score = Math.round(sig.score * 0.85);
+          }
+          const isScalpEntry = sig.strategy === "SCALP"; // always false now
           let stopLoss;
           if (isScalpEntry) {
-            // Scalp: stop fijo 1.5%
-            stopLoss = price * 0.985;
+            // SCALP is disabled (converted to MR) - this branch never runs
+            stopLoss = price * 0.992;
           } else {
+            // R/R enforcement: ensure stops make mathematical sense
+            // MR: min 0.8% stop, MOMENTUM: min 1.0% stop
             // Stop dinámico ATR + autoaprendizaje adaptativo
             const dynStop = calcDynamicStop(price, atrV, this.marketRegime);
             const learnedPct = this.adaptiveStop

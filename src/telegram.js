@@ -139,6 +139,7 @@ function startCommandListener(getState, botControls={}) {
             const chatId=u.message?.chat?.id?.toString();
             if(chatId!==CHAT_ID){continue;}
             const state=getState();
+            if(!state||state.loading) return send("⏳ Bot inicializando, intenta en unos segundos.");
             const mode=state.instance||state.mode||"BOT";
             if(text==="/estado")       send(buildDaily(state));
             else if(text==="/semana")  send(buildWeekly(state));
@@ -263,7 +264,46 @@ Ratio: ${wf.overfit} ${parseFloat(wf.overfit)<0.7?"⚠️ Overfitting posible":"
                 `🧠 Contexto: Régimen ${regimeEx}. Sentimiento: ${fgEx}. Momentum: ${momEx}.`,
               ].join("\n"));
             }
-                        else if(text==="/ayuda") send(buildHelp(mode));
+            
+            else if(text==="/resetcapital") {
+                // Reset capital to $50k KEEPING all learning:
+                // DQN weights, Q-table, MultiAgent, StrategyEvaluator, trade history
+                // Only resets: cash, portfolio (open positions), equity curve
+                const bot = botControls.getBot?.();
+                if(!bot) return send("❌ Bot no disponible");
+                const oldTv = bot.totalValue ? bot.totalValue() : 0;
+                const oldCash = bot.cash||0;
+                const openPos = Object.keys(bot.portfolio||{}).length;
+                
+                // Reset capital state KEEPING all learning
+                bot.cash = 50000;
+                bot.portfolio = {};
+                bot.equity = [{v:50000, t:Date.now()}];
+                bot.maxEquity = 50000;
+                bot.dailyTrades = {count:0, date:new Date().toDateString()};
+                
+                // Save immediately
+                if(bot.saveState) bot.saveState().catch(e=>console.warn("[RESET] Save error:", e.message));
+                
+                send([
+                  "✅ <b>Capital reseteado a $50,000</b>",
+                  "─────────────────────",
+                  `Capital anterior: $${oldTv.toFixed(2)}`,
+                  `Efectivo anterior: $${oldCash.toFixed(2)}`,
+                  `Posiciones cerradas: ${openPos}`,
+                  "",
+                  "✅ Mantenido intacto:",
+                  "• DQN weights y replay buffer",
+                  "• Q-Learning table",
+                  "• MultiAgent (4 agentes)",
+                  "• StrategyEvaluator",
+                  `• Historial de ${(bot.log||[]).filter(l=>l.type==="SELL").length} trades`,
+                  "• Pair scores y blacklist",
+                  "",
+                  "💼 Nuevo capital: $50,000 USDC",
+                ].join("\n"));
+              }
+            else if(text==="/ayuda") send(buildHelp(mode));
           }
         } catch(e){}
         setTimeout(poll,1000);

@@ -339,12 +339,14 @@ async function runFastLearn(bot, targetTrades=2000) {
       bot.qLearning.update(stateKey,action,t.pnlPct*0.2,stateKey);
       if(bot.dqn){
         const v=bot.dqn.encodeState({rsi:t.rsiEntry,bbZone:'lower_half',regime:t.regime,
-          trend:'neutral',volumeRatio:1,atrLevel:1,fearGreed:50,lsRatio:1});
+          trend:'neutral',volumeRatio:1,atrLevel:1,fearGreed:50,lsRatio:1,
+          sessionHour:12,winStreak:0,btcTrend24h:0,volatilityPct:50});
         bot.dqn.remember(v,action,t.pnlPct*0.2,v);
       }
       if(bot.multiAgent&&bot.dqn){
         const v=bot.dqn.encodeState({rsi:t.rsiEntry,bbZone:'lower_half',regime:t.regime,
-          trend:'neutral',volumeRatio:1,atrLevel:1,fearGreed:50,lsRatio:1});
+          trend:'neutral',volumeRatio:1,atrLevel:1,fearGreed:50,lsRatio:1,
+          sessionHour:12,winStreak:0,btcTrend24h:0,volatilityPct:50});
         bot.multiAgent.learnFromTrade(t.regime,v,action,t.pnlPct*0.2,v,t.pnlPct);
       }
       if(bot.stratEval) bot.stratEval.recordTrade('ENSEMBLE',t.regime,t.pnlPct);
