@@ -2,6 +2,7 @@
 // Instancia de aprendizaje: opera agresivamente en paper para
 // optimizar parámetros y exportarlos al bot LIVE cuando son buenos.
 "use strict";
+require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 
 const express    = require("express");
 const http       = require("http");
@@ -18,7 +19,25 @@ const { exportParams, calcSyncStats } = require("./sync");
 const { runHistoricalSimulation }     = require("./historicalSimulation");
 const tg         = require("./telegram");
 
-const PORT    = process.env.PORT    || 3000;
+
+let _cachedSentiment = { composite: 50, fearGreed: { value: 50, label: "Neutral" }, lastUpdate: 0 };
+function fetchSentimentData() {
+  const http = require("http");
+  return new Promise((res, rej) => {
+    const req = http.get("http://localhost:3004/api/sentiment", r => {
+      let d = "";
+      r.on("data", c => d += c);
+      r.on("end", () => { try { res(JSON.parse(d)); } catch(e) { rej(e); } });
+    });
+    req.on("error", rej);
+    req.setTimeout(5000, () => { req.destroy(); rej(new Error("timeout")); });
+  });
+}
+async function updateSentimentFromService() {
+  try { const data = await fetchSentimentData(); _cachedSentiment = data; return data; }
+  catch(e) { return _cachedSentiment; }
+}
+const PORT    = process.env.PORT    || 3002;
 const TICK_MS = parseInt(process.env.TICK_MS || "1000"); // 1s por defecto — variable Railway TICK_MS
 
 // Capital ficticio grande — cuantas más operaciones, mejor aprende
@@ -51,6 +70,27 @@ const wss    = new WebSocketServer({ server });
 
 app.use(express.static(path.join(__dirname, "../public")));
 app.use(express.json());
+// ── Basic Auth ──────────────────────────────────────────────────────────────
+const BASIC_USER = process.env.AUTH_USER || "bafir";
+const BASIC_PASS = process.env.AUTH_PASS || "bafir2026";
+app.use((req, res, next) => {
+  // Allow API calls from localhost (bots calling each other)
+  if(req.ip === "127.0.0.1" || req.ip === "::1" || req.ip === "::ffff:127.0.0.1") return next();
+  // Allow /api/* without auth so bots can consume sentiment/arb data
+  if(req.path.startsWith("/api/")) return next();
+  const auth = req.headers["authorization"];
+  if(!auth || !auth.startsWith("Basic ")) {
+    res.set("WWW-Authenticate", 'Basic realm="BAFIR Trading"');
+    return res.status(401).send("Acceso restringido");
+  }
+  const [user, pass] = Buffer.from(auth.slice(6), "base64").toString().split(":");
+  if(user !== BASIC_USER || pass !== BASIC_PASS) {
+    res.set("WWW-Authenticate", 'Basic realm="BAFIR Trading"');
+    return res.status(401).send("Credenciales incorrectas");
+  }
+  next();
+});
+
 
 function broadcast(msg) {
   const d = JSON.stringify(msg);
@@ -173,7 +213,7 @@ let bot;
     console.log("[PAPER-HIST] ✅ Prefill completo — DQN tiene contexto de "+PREFILL_SYMS.length+" pares");
   })();
 
-  fetchFearGreed().then(fg => { bot.fearGreed=fg.value; });
+  updateSentimentFromService().then(d=>{bot.fearGreed=d?.fearGreed?.value??d?.composite??50;bot.fearGreedSource='bafir-sentiment';}).catch(()=>{});
 
   // Simulación histórica al arrancar (no bloquea el bot)
   const HIST_SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","ADAUSDT","XRPUSDT","LINKUSDT","AVAXUSDT"];
@@ -356,7 +396,7 @@ function startLoop() {
     // Fear & Greed cada hora
     if(Date.now()-lastFearGreedCheck>3600000){
       lastFearGreedCheck=Date.now();
-      fetchFearGreed().then(fg=>{ bot.fearGreed=fg.value; });
+      updateSentimentFromService().then(d=>{bot.fearGreed=d?.fearGreed?.value??d?.composite??50;bot.fearGreedSource='bafir-sentiment';}).catch(()=>{});
     }
 
     // Noticias cada 10 min
