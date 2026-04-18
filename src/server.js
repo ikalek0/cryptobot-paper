@@ -231,11 +231,8 @@ let bot;
 let ticks=0;
 async function save() {
   if(!bot) return;
-  const s=bot.getState();
+  const s=JSON.parse(bot.serialize());
   s.blacklistData=blacklist.serialize();
-  s.optimizerHistory=bot.optimizer.history;
-  s.trailingHighs=bot.trailing.highs;
-  s.reentryTs=bot.reentryTs;
   await saveState(s);
 }
 process.on("SIGTERM",async()=>{await save();process.exit(0);});
