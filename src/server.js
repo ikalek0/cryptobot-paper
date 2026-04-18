@@ -162,10 +162,35 @@ function calcConsecutive(sells){
   return{wins,losses};
 }
 
+// ── Cold-start seed loader ───────────────────────────────────────────────────
+// Si no hay state.json acumulado, intenta usar data/cold-start-seed.json
+// generado por scripts/cold-start.js como estado inicial (Q-table + patterns
+// pre-aprendidos de 2500 velas 1h de 6 pares). No sobreescribe state.json real.
+function loadColdStartSeed() {
+  const fs   = require("fs");
+  const seed = path.join(__dirname, "..", "data", "cold-start-seed.json");
+  if (!fs.existsSync(seed)) return null;
+  try {
+    const data = JSON.parse(fs.readFileSync(seed, "utf8"));
+    const qN = Object.keys(data.learningData?.qLearning?.Q || {}).length;
+    const pN = Object.values(data.learningData?.patternMemory?.patterns || {})
+               .reduce((s,o) => s + Object.keys(o).length, 0);
+    console.log(`[COLD-START] Loaded ${qN} Q-entries, ${pN} patterns from seed (${data.generatedAt})`);
+    return data;
+  } catch (e) {
+    console.warn(`[COLD-START] seed ilegible: ${e.message}`);
+    return null;
+  }
+}
+
 let bot;
 (async () => {
   await detectBnbFeeMode();
-  const saved = await loadState();
+  let saved = await loadState();
+  if (!saved) {
+    const seed = loadColdStartSeed();
+    if (seed) saved = seed;
+  }
   bot = new CryptoBotFinal(saved);
   bot.mode = "PAPER";
 
