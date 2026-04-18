@@ -9,6 +9,43 @@ const path = require("path");
 
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const STATE_FILE   = path.join(__dirname, "../data/state.json");
+const BAK_FILE     = STATE_FILE + ".bak";
+const TMP_FILE     = STATE_FILE + ".tmp";
+
+// ── Escritura atómica ────────────────────────────────────────────────────────
+// Pipeline: write(tmp) → fsync → close → rotate(original→bak) → rename(tmp→original)
+// Si kill -9 cae en cualquier punto: o bien state.json queda íntegro (write
+// anterior) o bien state.json.bak contiene la versión previa válida.
+function atomicWriteFile(filePath, data) {
+  const tmpPath = filePath + ".tmp";
+  const bakPath = filePath + ".bak";
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+
+  const fd = fs.openSync(tmpPath, "w");
+  try {
+    fs.writeSync(fd, data);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  if (fs.existsSync(filePath)) {
+    fs.renameSync(filePath, bakPath);
+  }
+  fs.renameSync(tmpPath, filePath);
+}
+
+// Intenta parsear un JSON desde disco. Devuelve null si falla (con warning).
+function tryReadJson(filePath, label) {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    return JSON.parse(raw);
+  } catch (e) {
+    console.warn(`[DB] ${label} corrupto o ilegible: ${e.message}`);
+    return null;
+  }
+}
 
 // Hosts conocidos como muertos: bail out sin esperar al timeout de DNS
 const DEAD_HOSTS = ["railway.internal", "railway.app"];
@@ -76,9 +113,8 @@ async function saveState(state) {
   } catch(e) {
     disablePg(`saveState query falló: ${e.message}`);
   }
-  // Fallback a disco
-  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-  fs.writeFileSync(STATE_FILE, json, "utf8");
+  // Fallback a disco con escritura atómica + rotación de .bak
+  atomicWriteFile(STATE_FILE, json);
 }
 
 // ── LOAD ─────────────────────────────────────────────────────────────────────
@@ -95,12 +131,27 @@ async function loadState() {
   } catch(e) {
     disablePg(`loadState query falló: ${e.message}`);
   }
-  // Fallback a disco
+  // Fallback a disco con recuperación desde .bak si el principal está corrupto
+  const primary = tryReadJson(STATE_FILE, "state.json");
+  if (primary) {
+    console.log("[DB] Estado cargado desde disco ✓");
+    return primary;
+  }
   if (fs.existsSync(STATE_FILE)) {
-    try {
-      console.log("[DB] Estado cargado desde disco ✓");
-      return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-    } catch(e) {}
+    // existe pero corrupto → intentar .bak
+    const bak = tryReadJson(BAK_FILE, "state.json.bak");
+    if (bak) {
+      console.warn("[DB] state.json corrupto, cargando desde state.json.bak ✓");
+      return bak;
+    }
+    console.error("[DB] state.json y state.json.bak ambos ilegibles — arranque limpio");
+    return null;
+  }
+  // principal no existe: probar bak por si crash dejó sólo .bak
+  const bakOnly = tryReadJson(BAK_FILE, "state.json.bak");
+  if (bakOnly) {
+    console.warn("[DB] state.json ausente, cargando desde state.json.bak ✓");
+    return bakOnly;
   }
   return null;
 }
@@ -112,6 +163,8 @@ async function deleteState() {
     if (client) await client.query(`DELETE FROM bot_state WHERE key = 'paper_main'`);
   } catch(e) { disablePg(`deleteState query falló: ${e.message}`); }
   if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
+  if (fs.existsSync(BAK_FILE))   fs.unlinkSync(BAK_FILE);
+  if (fs.existsSync(TMP_FILE))   fs.unlinkSync(TMP_FILE);
 }
 
 module.exports = { saveState, loadState, deleteState };
