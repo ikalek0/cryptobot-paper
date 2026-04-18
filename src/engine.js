@@ -17,8 +17,14 @@ const INITIAL_CAPITAL  = parseFloat(process.env.CAPITAL_USDC || process.env.CAPI
 const MIN_CASH_RESERVE = 0.15;
 const PUMP_THRESHOLD   = 0.08;
 const REENTRY_COOLDOWN = 2 * 60 * 60 * 1000;
-const BNB_FEE          = 0.00075;
-const NORMAL_FEE       = 0.001;
+// ── Fees dinámicas ────────────────────────────────────────────────────────────
+// Binance VIP0 spot: 0.1% base; 25% descuento pagando con BNB → 0.075%.
+// EFFECTIVE_FEE se inicializa al fallback conservador y puede refinarse
+// llamando a detectBnbFeeMode() al arranque (consulta /api/v3/account).
+const FEE_RATE_USDC    = 0.001;
+const BNB_DISCOUNT     = 0.75;
+const FALLBACK_FEE     = FEE_RATE_USDC * BNB_DISCOUNT; // 0.00075
+let   EFFECTIVE_FEE    = FALLBACK_FEE;
 const MAX_DRAWDOWN_PCT = 0.15;
 // PAPER: sin circuit breaker ni blacklist — aprender en todas las condiciones
 
@@ -341,7 +347,62 @@ function updatePairScore(scores,symbol,pnl){
   return s.score;
 }
 
-function getFee(useBnb=true){return useBnb?BNB_FEE:NORMAL_FEE;}
+function getFee(){return EFFECTIVE_FEE;}
+function getEffectiveFeeInfo(){
+  return {
+    effective: EFFECTIVE_FEE,
+    base: FEE_RATE_USDC,
+    discountedWithBnb: FALLBACK_FEE,
+    usingBnbDiscount: Math.abs(EFFECTIVE_FEE - FALLBACK_FEE) < 1e-9,
+  };
+}
+
+// Intenta detectar si la cuenta Binance paga fees con BNB. En paper no hay API
+// key: se usa el fallback conservador (FALLBACK_FEE). En live (con API key):
+//   - consulta /api/v3/account firmada (HMAC-SHA256)
+//   - si balance BNB > 0.01 → asume useBnbFeeMode=true → EFFECTIVE_FEE=FALLBACK_FEE
+//   - si no hay BNB         → EFFECTIVE_FEE=FEE_RATE_USDC (full 0.1%)
+// Cualquier error de red/firma deja el fallback y loguea el motivo.
+async function detectBnbFeeMode(){
+  const apiKey    = process.env.BINANCE_API_KEY || "";
+  const apiSecret = process.env.BINANCE_API_SECRET || "";
+  if(!apiKey || !apiSecret){
+    EFFECTIVE_FEE = FALLBACK_FEE;
+    console.log(`[FEES] No API key, conservative fallback ${(EFFECTIVE_FEE*100).toFixed(3)}%`);
+    return EFFECTIVE_FEE;
+  }
+  try{
+    const crypto = require("crypto");
+    const https  = require("https");
+    const ts     = Date.now();
+    const qs     = `timestamp=${ts}&recvWindow=5000`;
+    const sig    = crypto.createHmac("sha256", apiSecret).update(qs).digest("hex");
+    const body   = await new Promise((resolve,reject)=>{
+      const req = https.request({
+        hostname:"api.binance.com",
+        path:`/api/v3/account?${qs}&signature=${sig}`,
+        method:"GET",
+        headers:{ "X-MBX-APIKEY": apiKey },
+      }, res=>{
+        let d=""; res.on("data",c=>d+=c); res.on("end",()=>resolve(d));
+      });
+      req.on("error",reject);
+      req.setTimeout(5000, ()=>{ req.destroy(); reject(new Error("timeout")); });
+      req.end();
+    });
+    const data = JSON.parse(body);
+    if(data.code){ throw new Error(`Binance error ${data.code}: ${data.msg}`); }
+    const bnbBal = parseFloat((data.balances||[]).find(b=>b.asset==="BNB")?.free || 0);
+    const useBnb = bnbBal > 0.01;
+    EFFECTIVE_FEE = useBnb ? FALLBACK_FEE : FEE_RATE_USDC;
+    console.log(`[FEES] Detected useBnbFeeMode=${useBnb} (BNB=${bnbBal.toFixed(4)}), effective=${(EFFECTIVE_FEE*100).toFixed(3)}%`);
+    return EFFECTIVE_FEE;
+  }catch(e){
+    EFFECTIVE_FEE = FALLBACK_FEE;
+    console.warn(`[FEES] Detection failed (${e.message}), conservative fallback ${(EFFECTIVE_FEE*100).toFixed(3)}%`);
+    return EFFECTIVE_FEE;
+  }
+}
 function runContrafactual(sym,history,ticksBack=10){
   const h=history[sym]||[];if(h.length<ticksBack+1)return null;
   const ep=h[h.length-ticksBack-1],cp=h[h.length-1];
@@ -528,7 +589,7 @@ class CryptoBotFinal {
       pairScore:this.pairScores[p.symbol]?.score||50,
     }));
 
-    const newTrades=[],fee=getFee(this.useBnb);
+    const newTrades=[],fee=getFee();
     this.riskLearning.evaluateDecisions(this.prices);
     const rlResult=this.riskLearning.optimize();
     if(rlResult) this._rlChanges=rlResult;
@@ -1135,4 +1196,4 @@ class CryptoBotFinal {
   }
 }
 
-module.exports={CryptoBotFinal,PAIRS,CATEGORIES,INITIAL_CAPITAL};
+module.exports={CryptoBotFinal,PAIRS,CATEGORIES,INITIAL_CAPITAL,detectBnbFeeMode,getFee,getEffectiveFeeInfo};

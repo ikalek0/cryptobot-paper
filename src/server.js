@@ -8,7 +8,7 @@ const express    = require("express");
 const http       = require("http");
 const path       = require("path");
 const { WebSocketServer, WebSocket } = require("ws");
-const { CryptoBotFinal, PAIRS }       = require("./engine");
+const { CryptoBotFinal, PAIRS, detectBnbFeeMode } = require("./engine");
 const { ensureTradeLogTable } = require("./trade_logger");
 const { scheduleWeeklyReport, scheduleTradeAnalysisReminder } = require("./weekly_report");
 const { saveState, loadState, deleteState } = require("./database");
@@ -164,6 +164,7 @@ function calcConsecutive(sells){
 
 let bot;
 (async () => {
+  await detectBnbFeeMode();
   const saved = await loadState();
   bot = new CryptoBotFinal(saved);
   bot.mode = "PAPER";
