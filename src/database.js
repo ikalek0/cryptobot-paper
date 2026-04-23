@@ -114,4 +114,4 @@ async function deleteState() {
   if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
 }
 
-module.exports = { saveState, loadState, deleteState };
+module.exports = { saveState, loadState, deleteState, getClient };
