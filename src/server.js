@@ -378,12 +378,18 @@ function startLoop() {
         // no tumbar el loop si PG está down.
         try {
           const db = await getClient();
+          // BUG-R2 (24 abr 2026): antes el objeto trade venía sin entryPrice/
+          // openTs/investUsdc/rsiAtEntry → server caía al `|| null` y todos los
+          // trades paper quedaban con esas columnas NULL. Engine ahora los
+          // popula (commit BUG-R2 en engine.js); server los pasa tal cual.
           if (db) await logTrade(db, {
             bot:"paper", symbol:trade.symbol, strategy:trade.strategy||"DQN",
             openTs:trade.openTs||null, closeTs:Date.now(),
             entryPrice:trade.entryPrice||null, exitPrice:trade.price||null,
-            pnlPct:trade.pnl, reason:trade.reason||null,
+            pnlPct:trade.pnl, investUsdc:trade.investUsdc||null,
+            reason:trade.reason||null,
             regime:bot.marketRegime||"UNKNOWN",
+            rsiAtEntry:trade.rsiAtEntry||null,
             fearGreed:bot.fearGreed||null,
             hourUtc:new Date().getUTCHours(),
           });
