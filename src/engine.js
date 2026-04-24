@@ -443,7 +443,23 @@ class CryptoBotFinal {
   }
 
   updatePrice(sym,price){
+    // BUG-R (24 abr 2026): sin guard aquí un precio corrupto (Infinity, NaN,
+    // 0, negativo, o valor absurdo tipo 1e30 de un mensaje @miniTicker malformado
+    // o de un saved.prices contaminado) se propagaba a this.portfolio[sym].entryPrice
+    // en el siguiente BUY, produciendo pnl_pct = -100.15 al cerrar (fórmula
+    // (cp - entry)/entry ≈ -1 cuando |entry| >> cp). Cortar en la fuente.
+    if (!Number.isFinite(price) || price <= 0 || price > 1e6) {
+      console.warn(`[PRICE-GUARD] ${sym}: rechazado precio inválido ${price}`);
+      return;
+    }
     const prevPrice = this.prices[sym] || price;
+    // Guard 2: saltos > 50% respecto al último precio conocido son glitches de feed,
+    // no movimientos reales. Mantener el precio anterior evita que una vela corrupta
+    // contamine entryPrice en un BUY del mismo tick.
+    if (this.prices[sym] && Math.abs((price - prevPrice) / prevPrice) > 0.5) {
+      console.warn(`[PRICE-GUARD] ${sym}: salto anómalo ${prevPrice}→${price} rechazado`);
+      return;
+    }
     this.prices[sym]=price;
     // Multi-timeframe aggregation: build 5m and 1h candles from 2s ticks
     if(!this._mtfBuf) this._mtfBuf = {};
