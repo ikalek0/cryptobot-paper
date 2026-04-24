@@ -443,7 +443,23 @@ class CryptoBotFinal {
   }
 
   updatePrice(sym,price){
+    // BUG-R (24 abr 2026): sin guard aquí un precio corrupto (Infinity, NaN,
+    // 0, negativo, o valor absurdo tipo 1e30 de un mensaje @miniTicker malformado
+    // o de un saved.prices contaminado) se propagaba a this.portfolio[sym].entryPrice
+    // en el siguiente BUY, produciendo pnl_pct = -100.15 al cerrar (fórmula
+    // (cp - entry)/entry ≈ -1 cuando |entry| >> cp). Cortar en la fuente.
+    if (!Number.isFinite(price) || price <= 0 || price > 1e6) {
+      console.warn(`[PRICE-GUARD] ${sym}: rechazado precio inválido ${price}`);
+      return;
+    }
     const prevPrice = this.prices[sym] || price;
+    // Guard 2: saltos > 50% respecto al último precio conocido son glitches de feed,
+    // no movimientos reales. Mantener el precio anterior evita que una vela corrupta
+    // contamine entryPrice en un BUY del mismo tick.
+    if (this.prices[sym] && Math.abs((price - prevPrice) / prevPrice) > 0.5) {
+      console.warn(`[PRICE-GUARD] ${sym}: salto anómalo ${prevPrice}→${price} rechazado`);
+      return;
+    }
     this.prices[sym]=price;
     // Multi-timeframe aggregation: build 5m and 1h candles from 2s ticks
     if(!this._mtfBuf) this._mtfBuf = {};
@@ -589,7 +605,9 @@ class CryptoBotFinal {
         this.portfolio[symbol].stopLoss = Math.max(pos.stopLoss, pos.entryPrice * 1.001);
         const pnlPart = (cp - pos.entryPrice) / pos.entryPrice * 100 - fee * 200;
         const partialPnlAbs = +(partialQty * cp * (pnlPart/100)).toFixed(2);
-        const partialTrade = {type:"SELL",symbol,name:pos.name,qty:+partialQty.toFixed(6),price:+cp.toFixed(4),pnl:+pnlPart.toFixed(2),pnlAbs:partialPnlAbs,reason:"PARTIAL EXIT",mode:this.mode,fee:+(partialQty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"ENSEMBLE"};
+        // BUG-R2: incluir entryPrice/openTs/investUsdc en el objeto trade para
+        // que server.js pueda persistirlos en trade_log (antes siempre NULL).
+        const partialTrade = {type:"SELL",symbol,name:pos.name,qty:+partialQty.toFixed(6),price:+cp.toFixed(4),pnl:+pnlPart.toFixed(2),pnlAbs:partialPnlAbs,reason:"PARTIAL EXIT",mode:this.mode,fee:+(partialQty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"ENSEMBLE",entryPrice:pos.entryPrice,openTs:pos.ts?new Date(pos.ts).getTime():null,investUsdc:+(partialQty*pos.entryPrice).toFixed(2),rsiAtEntry:pos.rsiEntry||null};
         newTrades.push(partialTrade);
         console.log(`[PAPER][PARTIAL] ${symbol} +${pnlPart.toFixed(2)}% → 50% vendido, stop→BE`);
       }
@@ -733,7 +751,9 @@ class CryptoBotFinal {
         }
         if(this._smartPause&&Date.now()>this._smartPause) this._smartPause=null;
         const pnlAbs = +(pos.qty * cp * (pnl/100)).toFixed(2); // P&L en USD absoluto
-        const trade={type:"SELL",symbol,name:pos.name,qty:+pos.qty.toFixed(6),price:+cp.toFixed(4),pnl:+pnl.toFixed(2),pnlAbs,reason,mode:this.mode,fee:+(pos.qty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"MOMENTUM"};
+        // BUG-R2: incluir entryPrice/openTs/investUsdc/rsiAtEntry para que
+        // server.js los persista en trade_log en vez de NULL.
+        const trade={type:"SELL",symbol,name:pos.name,qty:+pos.qty.toFixed(6),price:+cp.toFixed(4),pnl:+pnl.toFixed(2),pnlAbs,reason,mode:this.mode,fee:+(pos.qty*cp*fee).toFixed(4),ts:new Date().toISOString(),strategy:pos.strategy||"MOMENTUM",entryPrice:pos.entryPrice,openTs:pos.ts?new Date(pos.ts).getTime():null,investUsdc:+(pos.qty*pos.entryPrice).toFixed(2),rsiAtEntry:pos.rsiEntry||null};
         newTrades.push(trade);this.dailyTrades.count++;
         this.optimizer.recordTrade(pnl,reason);updatePairScore(this.pairScores,symbol,pnl);
         this.stratEval.recordTrade(pos.strategy, this.marketRegime, pnl);

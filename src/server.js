@@ -377,13 +377,30 @@ function startLoop() {
         // post-76108e6) y llamar logTrade con él. Silenciar fallos (try/catch) para
         // no tumbar el loop si PG está down.
         try {
+          // BUG-R (24 abr 2026): sanity check final antes de persistir. El
+          // guard en updatePrice() corta la fuente, pero si se nos escapa un
+          // pnl absurdo por otro camino (bug residual o precio corrupto
+          // pre-existente en saved state) NO contaminamos trade_log — preferimos
+          // perder la traza del trade a sesgar la agregación semanal.
+          const _pnl = trade.pnl;
+          if (!Number.isFinite(_pnl) || _pnl < -50 || _pnl > 50) {
+            console.warn(`[TRADE_LOG] pnl anómalo rechazado: ${trade.symbol} pnl=${_pnl} reason=${trade.reason} entry=${trade.entryPrice} exit=${trade.price}`);
+            try { tg.send?.(`⚠️ <b>[PAPER] PnL anómalo</b>\n<b>${trade.symbol}</b> pnl=${_pnl}%\nreason=${trade.reason} entry=${trade.entryPrice} exit=${trade.price}\nNO persistido en trade_log.`); } catch(_) {}
+            continue; // siguiente trade del loop for
+          }
           const db = await getClient();
+          // BUG-R2 (24 abr 2026): antes el objeto trade venía sin entryPrice/
+          // openTs/investUsdc/rsiAtEntry → server caía al `|| null` y todos los
+          // trades paper quedaban con esas columnas NULL. Engine ahora los
+          // popula (commit BUG-R2 en engine.js); server los pasa tal cual.
           if (db) await logTrade(db, {
             bot:"paper", symbol:trade.symbol, strategy:trade.strategy||"DQN",
             openTs:trade.openTs||null, closeTs:Date.now(),
             entryPrice:trade.entryPrice||null, exitPrice:trade.price||null,
-            pnlPct:trade.pnl, reason:trade.reason||null,
+            pnlPct:trade.pnl, investUsdc:trade.investUsdc||null,
+            reason:trade.reason||null,
             regime:bot.marketRegime||"UNKNOWN",
+            rsiAtEntry:trade.rsiAtEntry||null,
             fearGreed:bot.fearGreed||null,
             hourUtc:new Date().getUTCHours(),
           });
