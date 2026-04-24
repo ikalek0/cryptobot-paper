@@ -9,9 +9,9 @@ const http       = require("http");
 const path       = require("path");
 const { WebSocketServer, WebSocket } = require("ws");
 const { CryptoBotFinal, PAIRS }       = require("./engine");
-const { ensureTradeLogTable } = require("./trade_logger");
+const { ensureTradeLogTable, logTrade } = require("./trade_logger");
 const { scheduleWeeklyReport, scheduleTradeAnalysisReminder } = require("./weekly_report");
-const { saveState, loadState, deleteState } = require("./database");
+const { saveState, loadState, deleteState, getClient } = require("./database");
 const { Blacklist, MarketGuard, getTradingScore } = require("./market");
 const { CryptoPanicDefense } = require("./cryptoPanic");
 const { fetchFearGreed, fetchNewsAlert, fetchAllKlines, runNightlyReplay } = require("./feeds");
@@ -372,9 +372,13 @@ function startLoop() {
         if(trade.pnl<0){ const wasBl=blacklist.isBlacklisted(trade.symbol); blacklist.recordLoss(trade.symbol); if(!wasBl&&blacklist.isBlacklisted(trade.symbol)) tg.notifyBlacklist(trade.symbol); }
         else blacklist.recordWin(trade.symbol);
         // Structured trade log → PostgreSQL
+        // BUG-M (24 abr 2026): logTrade usaba `client` no declarado → trade_log
+        // siempre vacío en paper. Fix: obtener el pool via getClient() (exportado
+        // post-76108e6) y llamar logTrade con él. Silenciar fallos (try/catch) para
+        // no tumbar el loop si PG está down.
         try {
-          const { logTrade: _lt } = require("./trade_logger");
-          _lt(client, {
+          const db = await getClient();
+          if (db) await logTrade(db, {
             bot:"paper", symbol:trade.symbol, strategy:trade.strategy||"DQN",
             openTs:trade.openTs||null, closeTs:Date.now(),
             entryPrice:trade.entryPrice||null, exitPrice:trade.price||null,
@@ -382,7 +386,7 @@ function startLoop() {
             regime:bot.marketRegime||"UNKNOWN",
             fearGreed:bot.fearGreed||null,
             hourUtc:new Date().getUTCHours(),
-          }).catch(()=>{});
+          });
         } catch(e) {}
       }
     }
